@@ -1,4 +1,4 @@
-﻿using NAudio.Wave;
+using NAudio.Wave;
 using QDNH.Language;
 using System;
 using System.Collections.Generic;
@@ -47,6 +47,13 @@ namespace QDNH.Settings
         public static WaveFormat WaveFormat { get; } = new(22050, 16, 1);
         public static bool Audio { get; private set; } = true;
         public static bool Serial { get; private set; } = true;
+
+        // Shared Radio Mode: cuando esta activo, Main.cs usa MultiListen
+        // (audio/serie multi-cliente) + ControlChannel + SessionManager en
+        // vez de los Listen de siempre. El modo tradicional de un solo
+        // usuario (Listen.cs) no se toca y sigue siendo lo que se usa
+        // cuando esto esta en false (por defecto).
+        public static bool SharedRadioMode { get; set; } = false;
         public static int LatencyMils
         {
             get => latency;
@@ -83,7 +90,9 @@ namespace QDNH.Settings
                         nameof(Language),
                         Language,
                         nameof(Mode),
-                        Mode
+                        Mode,
+                        nameof(SharedRadioMode),
+                        SharedRadioMode.ToString()
                     });
                 }
                 catch 
@@ -131,6 +140,9 @@ namespace QDNH.Settings
                             break;
                         case nameof(Mode):
                             Mode = value;
+                            break;
+                        case nameof(SharedRadioMode):
+                            SharedRadioMode = bool.TryParse(value, out bool srm) && srm;
                             break;
                         default:
                             Err($"{Lang.ConfigError}: {key} / {value}");

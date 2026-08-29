@@ -1,0 +1,27 @@
+name: Build QDNH
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 6
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Publish QDNH (win-x64, framework-dependent)
+        run: dotnet publish QDNH/QDNH.csproj -c Release -r win-x64 --self-contained false -o publish/win-x64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QDNH-win-x64
+          path: publish/win-x64

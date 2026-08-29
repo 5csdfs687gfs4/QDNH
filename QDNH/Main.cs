@@ -1,4 +1,4 @@
-﻿using Alsa.Net;
+using Alsa.Net;
 using NAudio.CoreAudioApi;
 using QDNH.Audio;
 using QDNH.Language;
@@ -34,6 +34,12 @@ namespace QDNH
         private static readonly List<string> alsaDevices = new();
         private static string[] ports = null!;
         private static Listen? audioServer = null, serialServer = null;
+        // Shared Radio Mode (multi-usuario): sustituyen a audioServer/
+        // serialServer cuando Vars.SharedRadioMode esta activo. El modo
+        // tradicional de un solo usuario (arriba) no se toca.
+        private static MultiListen? multiAudioServer = null, multiSerialServer = null;
+        private static ControlChannel? controlChannel = null;
+        private static readonly QDNH.SharedRadio.SessionManager sessions = new();
         private static UART? serialPort = null;
         private static ICapture? capture = null;
         private static IPlayback? playback = null;
@@ -259,6 +265,24 @@ namespace QDNH
                                 break;
                         }
                         break;
+                    case "U":
+                        if (p.Length == 1) { DisplaySharedRadioMode(); break; }
+                        switch (p1s.ToLower())
+                        {
+                            case "on":
+                                Vars.SharedRadioMode = true;
+                                postAction = CommandPostAction.Init;
+                                break;
+                            case "off":
+                                Vars.SharedRadioMode = false;
+                                postAction = CommandPostAction.Init;
+                                break;
+                            default:
+                                Err($"{Lang.UnknownCommand} '{command}'");
+                                postAction = CommandPostAction.Error;
+                                break;
+                        }
+                        break;
                     default:
                         Err($"{Lang.UnknownCommand} '{command}'");
                         postAction = CommandPostAction.Error;
@@ -395,8 +419,18 @@ namespace QDNH
 
         private static void DisplayNetPorts()
         {
-            Out($"\n{Lang.NetPorts}\t\t{Vars.NetworkPort}, {Vars.NetworkPort + 1}");
+            string ports3 = Vars.SharedRadioMode
+                ? $"{Vars.NetworkPort}, {Vars.NetworkPort + 1}, {Vars.NetworkPort + 2}"
+                : $"{Vars.NetworkPort}, {Vars.NetworkPort + 1}";
+            Out($"\n{Lang.NetPorts}\t\t{ports3}");
             Out($"\n{Lang.LocalHost}\t\t{Dns.GetHostName()}");
+        }
+
+        private static void DisplaySharedRadioMode()
+        {
+            Out($"\nShared Radio Mode\t{(Vars.SharedRadioMode ? "ON" : "OFF")}");
+            if (Vars.SharedRadioMode)
+                Out($"  Control port\t\t{Vars.NetworkPort + 2}");
         }
 
         private static void DisplayPassword(bool unmask)
@@ -427,6 +461,7 @@ namespace QDNH
             DisplayNetPorts();
             DisplayPassword(false);
             DisplayLatency();
+            DisplaySharedRadioMode();
         }
 
         private static void Init()
@@ -441,19 +476,39 @@ namespace QDNH
             {
                 serialPort?.Close();
                 serialServer?.Close();
+                serialServer = null;
+                multiSerialServer?.Close();
+                multiSerialServer = null;
                 if (!Vars.ComPort.Equals(Lang.Disabled))
                 {
                     try { serialPort = new(Vars.ComPort, SerialDataCallback); } catch { }
                 }
-                try { serialServer = new(Vars.NetworkPort + 1, NetworkSerialCallback, false); } catch { }
+                if (Vars.SharedRadioMode)
+                {
+                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected); } catch { }
+                }
+                else
+                {
+                    try { serialServer = new(Vars.NetworkPort + 1, NetworkSerialCallback, false); } catch { }
+                }
             }
             if (Vars.Audio)
             {
                 audioServer?.Close();
+                audioServer = null;
+                multiAudioServer?.Close();
+                multiAudioServer = null;
                 capture?.Close();
                 playback?.Close();
                 if (audioPlatform == AudioPlatform.ALSA) ALSA.Configure();
-                try { audioServer = new(Vars.NetworkPort, NetworkAudioCallback, true); } catch { }
+                if (Vars.SharedRadioMode)
+                {
+                    try { multiAudioServer = new(Vars.NetworkPort, MultiNetworkAudioCallback, MultiAudioConnected, MultiAudioDisconnected); } catch { }
+                }
+                else
+                {
+                    try { audioServer = new(Vars.NetworkPort, NetworkAudioCallback, true); } catch { }
+                }
                 switch (audioPlatform)
                 {
                     case AudioPlatform.WASAPI:
@@ -478,21 +533,44 @@ namespace QDNH
                         break;
                 }
             }
+
+            // Canal de control de Shared Radio Mode: independiente de
+            // Vars.Audio/Vars.Serial (siempre puerto NetworkPort+2 cuando
+            // el modo esta activo). No existe en absoluto en el modo
+            // tradicional de un solo usuario.
+            controlChannel?.Close();
+            controlChannel = null;
+            if (Vars.SharedRadioMode)
+            {
+                try { controlChannel = new(Vars.NetworkPort + 2, sessions); } catch { }
+            }
         }
 
 
         private static void CaptureCallback(byte[] data, int length)
         {
-            audioServer?.Send(data, 0, length);
+            // RX real de la radio (microfono/discriminador del AIOC hacia
+            // la red): en modo tradicional va solo al unico cliente
+            // conectado; en Shared Radio Mode se reparte a TODAS las
+            // sesiones conectadas (SessionManager.FanOutRx).
+            if (Vars.SharedRadioMode)
+                sessions.FanOutRx(data, length);
+            else
+                audioServer?.Send(data, 0, length);
         }
 
         private static void SerialDataCallback(byte[] data, int length)
         {
-            serialServer?.Send(data, 0, length);
+            if (Vars.SharedRadioMode)
+                sessions.FanOutSerialRx(data, length);
+            else
+                serialServer?.Send(data, 0, length);
         }
 
         private static void NetworkAudioCallback(byte[] data, int length)
         {
+            // Ruta TX critica del modo tradicional (un solo cliente,
+            // siempre confiado): sin cambios.
             playback?.Send(data, length);
         }
 
@@ -500,6 +578,49 @@ namespace QDNH
         {
             serialPort?.Send(data, 0, length);
         }
+
+        // ------------------------------------------------------------
+        // Shared Radio Mode: callbacks de MultiListen (audio/serie
+        // multi-cliente) y ControlChannel. Toda la logica de quien tiene
+        // el TX/control vive en SharedRadio/SessionManager.cs -- aqui
+        // solo se decide, con su resultado, si el bloque sigue su camino
+        // critico hacia el AIOC (playback/serialPort) o se descarta.
+        // ------------------------------------------------------------
+
+        private static void MultiNetworkAudioCallback(Guid sessionId, byte[] data, int length)
+        {
+            // Unico punto de entrada de PCM TX por red en Shared Radio
+            // Mode: SessionManager decide si esta sesion es la TxOwner
+            // legitima (y de paso renueva el lease, anuncia
+            // TX_MONITOR_STARTED la primera vez y reparte la copia a los
+            // demas oyentes). Si no lo es, el bloque se descarta aqui
+            // mismo y jamas llega al AIOC -- la radio no puede mezclar
+            // TX de dos operadores a la vez.
+            if (sessions.OnTxAudio(sessionId, data, length))
+                playback?.Send(data, length);
+        }
+
+        private static void MultiNetworkSerialCallback(Guid sessionId, byte[] data, int length)
+        {
+            // Solo quien tiene el Control Lock puede mandar comandos CAT
+            // a la radio (cambiar VFO, modo, etc.) en Shared Radio Mode.
+            // El resto de sesiones siguen recibiendo la telemetria/LCD
+            // via FanOutSerialRx, pero no pueden escribir.
+            if (sessions.IsControlOwner(sessionId))
+                serialPort?.Send(data, 0, length);
+        }
+
+        private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send) =>
+            sessions.AttachAudio(sessionId, send);
+
+        private static void MultiAudioDisconnected(Guid sessionId) =>
+            sessions.OnAudioChannelClosed(sessionId);
+
+        private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send) =>
+            sessions.AttachSerial(sessionId, send);
+
+        private static void MultiSerialDisconnected(Guid sessionId) =>
+            sessions.OnSerialChannelClosed(sessionId);
 
     }
 

@@ -2,6 +2,7 @@ using QDNH.Settings;
 using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 
@@ -106,6 +107,17 @@ namespace QDNH.Network
                 }
                 Guid sessionId = new(idBytes);
 
+                // Herramienta de diagnostico (ago-2026, desconexiones
+                // intermitentes de Shared Radio Mode sobre WAN): duracion
+                // de esta conexion y bytes recibidos, para poder loguear
+                // ambos en el momento del corte -- antes esta rama del
+                // read loop se limitaba a "catch { br = -1; }", tragandose
+                // la excepcion entera sin dejar ni rastro de si el corte
+                // fue por una excepcion real (y cual) o un EOF limpio del
+                // otro lado.
+                DateTime connectedAtUtc = DateTime.UtcNow;
+                long bytesInThisConn = 0;
+
                 // Cola acotada propia de este cliente para lo que le
                 // enviemos (RX real, telemetria serie o copia de TX
                 // Monitor, segun el puerto). Descarta lo mas antiguo si
@@ -137,24 +149,57 @@ namespace QDNH.Network
                     }
                 });
 
+                Exception? lastException = null;
                 try
                 {
                     while (!closed)
                     {
                         byte[] b = new byte[4096];
                         int br;
-                        try { br = await stream.ReadAsync(b); } catch { br = -1; }
+                        try { br = await stream.ReadAsync(b); }
+                        catch (Exception ex) { lastException = ex; br = -1; }
                         if (br <= 0) break;
+                        bytesInThisConn += br;
                         callback(sessionId, b, br);
                     }
                 }
                 finally
                 {
+                    double secs = (DateTime.UtcNow - connectedAtUtc).TotalSeconds;
+                    string reason = lastException == null
+                        ? "EOF limpio (FIN remoto, sin excepcion)"
+                        : ExceptionChain(lastException);
+                    Vars.Out($"[SharedRadio] cliente desconectado sesion={sessionId} " +
+                             $"duracion={secs:F1}s recibidos={bytesInThisConn}B motivo={reason}");
                     queue.Writer.TryComplete();
                     try { await sender; } catch { }
                     onDisconnected(sessionId);
                 }
             }
+        }
+
+        // Herramienta de diagnostico: recorre ex.InnerException (hasta 4
+        // niveles) para sacar a la luz el SocketException real cuando lo
+        // hay -- el mensaje externo (p.ej. de un IOException) casi nunca
+        // dice la causa; su SocketErrorCode (ConnectionReset, TimedOut,
+        // ConnectionAborted...) es lo que de verdad distingue un corte
+        // iniciado por el otro lado de uno causado por el camino de red.
+        private static string ExceptionChain(Exception ex)
+        {
+            StringBuilder sb = new();
+            Exception? current = ex;
+            int depth = 0;
+            while (current != null && depth < 4)
+            {
+                if (depth > 0) sb.Append(" <- ");
+                sb.Append(current.GetType().Name);
+                if (current is SocketException se)
+                    sb.Append($"({se.SocketErrorCode})");
+                sb.Append(": ").Append(current.Message);
+                current = current.InnerException;
+                depth++;
+            }
+            return sb.ToString();
         }
     }
 }

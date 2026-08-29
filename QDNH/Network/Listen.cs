@@ -1,4 +1,4 @@
-﻿using QDNH.Language;
+using QDNH.Language;
 using QDNH.Settings;
 using System;
 using System.Collections.Generic;
@@ -110,6 +110,10 @@ namespace QDNH.Network
                 try
                 {
                     client = await listener.AcceptTcpClientAsync();
+                    // TCP_NODELAY (ago-2026, recuperado de un fix huerfano
+                    // que nunca llego a mergearse): sin esto Nagle agrupa
+                    // bloques cortos (audio/comandos) y los retrasa.
+                    try { client.NoDelay = true; } catch { }
                     stream = client.GetStream();
                 }
                 catch { continue; }

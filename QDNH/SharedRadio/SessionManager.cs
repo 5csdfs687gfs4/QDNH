@@ -38,6 +38,22 @@ namespace QDNH.SharedRadio
         private static readonly TimeSpan TxLeaseTimeout = TimeSpan.FromSeconds(10);
         private readonly Timer txWatchdog;
 
+        // Throttle del aviso "audio TX descartado": un cliente SIN Fase B
+        // (todavia no implementa "tomar el control"/TX Request, p.ej. el
+        // QDockX actual) manda su stream de microfono de forma CONTINUA
+        // por el canal de audio -- igual que en el modo tradicional, donde
+        // el PTT real lo decide el hardware, no el canal de audio -- asi
+        // que aqui cada bloque (uno cada ~20ms) se rechaza y, sin este
+        // throttle, generaba decenas de lineas de log por segundo. Eso no
+        // solo ensucia la consola: en Windows, si la consola tiene
+        // QuickEdit Mode activo y alguien hace clic o selecciona texto,
+        // Console.Write se BLOQUEA hasta que se suelta la seleccion --
+        // bloqueando este mismo hilo (CaptureCallback), acumulando
+        // backlog y pudiendo acabar pareciendo un cuelgue/desconexion del
+        // cliente. Se avisa como mucho una vez cada 5s por sesion.
+        private readonly ConcurrentDictionary<Guid, DateTime> lastAudioRejectLogUtc = new();
+        private static readonly TimeSpan AudioRejectLogInterval = TimeSpan.FromSeconds(5);
+
         public SessionManager()
         {
             txWatchdog = new Timer(_ => CheckTxLease(), null, 1000, 1000);
@@ -100,6 +116,7 @@ namespace QDNH.SharedRadio
 
         public void OnControlChannelClosed(Guid sessionId)
         {
+            lastAudioRejectLogUtc.TryRemove(sessionId, out _);
             if (sessions.TryRemove(sessionId, out var s))
                 Vars.Out($"[SharedRadio] sesion desconectada: {s.Callsign} ({sessionId})");
 
@@ -229,9 +246,15 @@ namespace QDNH.SharedRadio
         {
             if (TxOwnerSessionId != sessionId)
             {
-                Vars.Out($"[SharedRadio] audio TX descartado (sesion {sessionId} no tiene el TX)");
+                DateTime now = DateTime.UtcNow;
+                if (!lastAudioRejectLogUtc.TryGetValue(sessionId, out var last) || now - last > AudioRejectLogInterval)
+                {
+                    lastAudioRejectLogUtc[sessionId] = now;
+                    Vars.Out($"[SharedRadio] audio TX descartado (sesion {sessionId} no tiene el TX) -- repitiendo cada {AudioRejectLogInterval.TotalSeconds:F0}s mientras dure");
+                }
                 return false;
             }
+            lastAudioRejectLogUtc.TryRemove(sessionId, out _);
 
             txLeaseExpiresUtc = DateTime.UtcNow + TxLeaseTimeout;
 

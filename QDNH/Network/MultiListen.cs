@@ -74,6 +74,12 @@ namespace QDNH.Network
         {
             using (client)
             {
+                // TCP_NODELAY (ago-2026, recuperado de un fix huerfano que
+                // nunca llego a mergearse en Listen.cs): sin esto Nagle
+                // agrupa bloques cortos (audio/comandos) y los retrasa --
+                // mas notable en WAN, donde puede dar la impresion de un
+                // corte de conexion entero en vez de simple latencia.
+                try { client.NoDelay = true; } catch { }
                 NetworkStream stream = client.GetStream();
 
                 Authenticator auth = new(Vars.Password);

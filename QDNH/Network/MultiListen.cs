@@ -32,7 +32,7 @@ namespace QDNH.Network
         private readonly TcpListener listener;
         private readonly Action<Guid, byte[], int> callback;
         private readonly Func<Guid, Action<byte[], int>, object> onConnected;
-        private readonly Action<Guid> onDisconnected;
+        private readonly Action<Guid, Action<byte[], int>> onDisconnected;
         private bool closed = false;
         private readonly Task loop;
 
@@ -40,7 +40,7 @@ namespace QDNH.Network
             int port,
             Action<Guid, byte[], int> callback,
             Func<Guid, Action<byte[], int>, object> onConnected,
-            Action<Guid> onDisconnected)
+            Action<Guid, Action<byte[], int>> onDisconnected)
         {
             this.callback = callback;
             this.onConnected = onConnected;
@@ -172,8 +172,11 @@ namespace QDNH.Network
                     Vars.Out($"[SharedRadio] cliente desconectado sesion={sessionId} " +
                              $"duracion={secs:F1}s recibidos={bytesInThisConn}B motivo={reason}");
                     queue.Writer.TryComplete();
-                    try { await sender; } catch { }
-                    onDisconnected(sessionId);
+                    // A peer can close its write half while no longer reading.
+                    // Do not keep the session (and its TX lock) alive forever
+                    // while the outgoing writer is blocked on that socket.
+                    try { await sender.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
+                    onDisconnected(sessionId, Send);
                 }
             }
         }

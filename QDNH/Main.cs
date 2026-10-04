@@ -613,14 +613,14 @@ namespace QDNH
         private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.AttachAudio(sessionId, send);
 
-        private static void MultiAudioDisconnected(Guid sessionId) =>
-            sessions.OnAudioChannelClosed(sessionId);
+        private static void MultiAudioDisconnected(Guid sessionId, Action<byte[], int> send) =>
+            sessions.OnAudioChannelClosed(sessionId, send);
 
         private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.AttachSerial(sessionId, send);
 
-        private static void MultiSerialDisconnected(Guid sessionId) =>
-            sessions.OnSerialChannelClosed(sessionId);
+        private static void MultiSerialDisconnected(Guid sessionId, Action<byte[], int> send) =>
+            sessions.OnSerialChannelClosed(sessionId, send);
 
     }
 

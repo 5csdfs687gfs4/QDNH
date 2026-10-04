@@ -3,6 +3,7 @@ name: Build QDNH
 on:
   push:
     branches: [ master ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -16,6 +17,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '6.0.x'
+
+      - name: Test shared radio sessions
+        run: dotnet test QDNH.Tests/QDNH.Tests.csproj -c Release --verbosity quiet
 
       - name: Publish QDNH (win-x64, framework-dependent)
         run: dotnet publish QDNH/QDNH.csproj -c Release -r win-x64 --self-contained false -o publish/win-x64

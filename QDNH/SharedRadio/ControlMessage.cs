@@ -33,11 +33,16 @@ namespace QDNH.SharedRadio
         TxReleased = 10,
         TxMonitorStarted = 11,
         TxMonitorStopped = 12,
+        HealthRequest = 21, HealthState = 22, OperatorsRequest = 23, OperatorsState = 24, QueueJoin = 25, QueueLeave = 26,
     }
 
-    public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor);
+    public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor, int ProtocolVersion = 1, string[]? Capabilities = null);
 
-    public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign);
+    public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign, int ProtocolVersion = 2, string? ServerVersion = null, string[]? Capabilities = null);
+
+    public record OperatorInfo(Guid SessionId, string Callsign, bool AudioConnected, bool SerialConnected, bool HasControl, bool HasTx, int QueuePosition);
+    public record OperatorsStateMessage(OperatorInfo[] Operators);
+    public record HealthStateMessage(string ServerVersion, int ProtocolVersion, bool SerialConnected, bool AudioCaptureReady, bool AudioPlaybackReady, int ConnectedOperators, int TxLeaseSeconds, int MaxTxSeconds, string[] Capabilities);
 
     public record ControlGrantedMessage(Guid SessionId, string Callsign);
 

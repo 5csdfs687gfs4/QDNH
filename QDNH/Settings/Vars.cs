@@ -28,7 +28,7 @@ namespace QDNH.Settings
             {
                 Audio = true;
                 Serial = true;
-                switch(mode = value)
+                switch (mode = value)
                 {
                     case "audio": Serial = false; break;
                     case "serial": Audio = false; break;
@@ -53,6 +53,9 @@ namespace QDNH.Settings
         // vez de los Listen de siempre. El modo tradicional de un solo
         // usuario (Listen.cs) no se toca y sigue siendo lo que se usa
         // cuando esto esta en false (por defecto).
+        private static int txLeaseSeconds = 10, maxTxSeconds = 180;
+        public static int TxLeaseSeconds { get => txLeaseSeconds; set => txLeaseSeconds = value.Clamp(2, 120); }
+        public static int MaxTxSeconds { get => maxTxSeconds; set => maxTxSeconds = value.Clamp(5, 1800); }
         public static bool SharedRadioMode { get; set; } = false;
         public static int LatencyMils
         {
@@ -92,10 +95,12 @@ namespace QDNH.Settings
                         nameof(Mode),
                         Mode,
                         nameof(SharedRadioMode),
-                        SharedRadioMode.ToString()
+                        SharedRadioMode.ToString(),
+                        nameof(TxLeaseSeconds), TxLeaseSeconds.ToString(),
+                        nameof(MaxTxSeconds), MaxTxSeconds.ToString()
                     });
                 }
-                catch 
+                catch
                 {
                     Err($"{Lang.SaveError}: {ConfigFile}");
                 }
@@ -141,6 +146,8 @@ namespace QDNH.Settings
                         case nameof(Mode):
                             Mode = value;
                             break;
+                        case nameof(TxLeaseSeconds): TxLeaseSeconds = int.TryParse(value, out p) ? p : 10; break;
+                        case nameof(MaxTxSeconds): MaxTxSeconds = int.TryParse(value, out p) ? p : 180; break;
                         case nameof(SharedRadioMode):
                             SharedRadioMode = bool.TryParse(value, out bool srm) && srm;
                             break;
@@ -150,7 +157,7 @@ namespace QDNH.Settings
                     }
                 }
             }
-            catch(FileNotFoundException) { }
+            catch (FileNotFoundException) { }
             catch
             {
                 Err($"{Lang.ReadError}: {ConfigFile}");

@@ -39,7 +39,12 @@ namespace QDNH
         // tradicional de un solo usuario (arriba) no se toca.
         private static MultiListen? multiAudioServer = null, multiSerialServer = null;
         private static ControlChannel? controlChannel = null;
-        private static readonly QDNH.SharedRadio.SessionManager sessions = new();
+        private static readonly QDNH.SharedRadio.SessionManager sessions = new(ReleasePhysicalPtt);
+        private static void ReleasePhysicalPtt()
+        {
+            var frame = RadioProtocol.ReleasePtt();
+            serialPort?.Send(frame, 0, frame.Length);
+        }
         private static UART? serialPort = null;
         private static ICapture? capture = null;
         private static IPlayback? playback = null;
@@ -54,6 +59,8 @@ namespace QDNH
 
         public static void Run(string[] args)
         {
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => sessions.ReleaseAnyTx("SERVER_STOPPED");
+            Console.CancelKeyPress += (_, _) => sessions.ReleaseAnyTx("SERVER_STOPPED");
             restartTimer.Elapsed += RestartTimer_Elapsed;
             restartTimer.Start();
             if (args.Length > 0)
@@ -89,6 +96,7 @@ namespace QDNH
                 switch (ExecuteCommand(Vars.In()))
                 {
                     case CommandPostAction.Quit:
+                        sessions.ReleaseAnyTx("SERVER_STOPPED");
                         quit = true;
                         break;
                     case CommandPostAction.Init:
@@ -119,7 +127,7 @@ namespace QDNH
                 string[] p = command.Trim().Split(' ');
                 string p1s = p.Length > 1 ? p[1] : string.Empty;
                 int p1 = int.TryParse(p1s, out int i) ? i : -1;
-                switch (p[0].ToUpper().Replace("-",""))
+                switch (p[0].ToUpper().Replace("-", ""))
                 {
                     case "#":
                         if (Vars.Audio)
@@ -127,6 +135,7 @@ namespace QDNH
                             Vars.Out("Closing Audio");
                             capture?.Close();
                             playback?.Close();
+                            capture = null; playback = null;
                         }
                         break;
                     case "E":
@@ -205,7 +214,7 @@ namespace QDNH
                                 postAction = CommandPostAction.Init;
                             }
                             else
-                            if(p1s.StartsWith("tty"))
+                            if (p1s.StartsWith("tty"))
                             {
                                 Vars.ComPort = p1s;
                                 postAction = CommandPostAction.Init;
@@ -257,7 +266,7 @@ namespace QDNH
                         break;
                     case "M":
                         if (p.Length == 1) { DisplayMode(); break; }
-                        switch(p1s.ToLower())
+                        switch (p1s.ToLower())
                         {
                             case var n when n == "all" || n == "audio" || n == "serial":
                                 Vars.Mode = n;
@@ -323,7 +332,7 @@ namespace QDNH
                     try { id = File.ReadAllText($"/proc/asound/card{i}/id"); } catch { break; }
                     alsaDevices.Add(id.Replace('\n', ' ').Replace('\r', ' ').Trim());
                 }
-            }           
+            }
         }
 
         private static void EnumerateDevices()
@@ -412,7 +421,7 @@ namespace QDNH
                     string sel = fn.Equals(Vars.ComPort) ? "*" : " ";
                     Out($" {sel}{i + 1} - {fn}");
                 }
-                if(Vars.ComPort.StartsWith("tty"))
+                if (Vars.ComPort.StartsWith("tty"))
                     Out($" *F - /dev/{Vars.ComPort}");
             }
         }
@@ -453,7 +462,7 @@ namespace QDNH
         }
 
         private static void DisplayAll()
-        {            
+        {
             DisplayMode();
             DisplayInputs();
             DisplayOutputs();
@@ -466,6 +475,7 @@ namespace QDNH
 
         private static void Init()
         {
+            sessions.ReleaseAnyTx("SERVER_RECONFIGURED");
             restartTimer.Interval++;
             restartTimer.Interval--;
             commandLine = false;
@@ -475,17 +485,18 @@ namespace QDNH
             if (Vars.Serial)
             {
                 serialPort?.Close();
+                serialPort = null;
                 serialServer?.Close();
                 serialServer = null;
                 multiSerialServer?.Close();
                 multiSerialServer = null;
                 if (!Vars.ComPort.Equals(Lang.Disabled))
                 {
-                    try { serialPort = new(Vars.ComPort, SerialDataCallback); } catch { }
+                    try { serialPort = new(Vars.ComPort, SerialDataCallback, () => sessions.ReleaseAnyTx("SERIAL_LOST")); } catch { }
                 }
                 if (Vars.SharedRadioMode)
                 {
-                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected); } catch { }
+                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected, false); } catch { }
                 }
                 else
                 {
@@ -500,6 +511,7 @@ namespace QDNH
                 multiAudioServer = null;
                 capture?.Close();
                 playback?.Close();
+                capture = null; playback = null;
                 if (audioPlatform == AudioPlatform.ALSA) ALSA.Configure();
                 if (Vars.SharedRadioMode)
                 {
@@ -542,6 +554,7 @@ namespace QDNH
             controlChannel = null;
             if (Vars.SharedRadioMode)
             {
+                sessions.HardwareStatus = () => (serialPort?.IsConnected == true, capture != null, playback != null);
                 try { controlChannel = new(Vars.NetworkPort + 2, sessions); } catch { }
             }
         }
@@ -587,7 +600,7 @@ namespace QDNH
         // critico hacia el AIOC (playback/serialPort) o se descarta.
         // ------------------------------------------------------------
 
-        private static void MultiNetworkAudioCallback(Guid sessionId, byte[] data, int length)
+        private static void MultiNetworkAudioCallback(Guid sessionId, Action<byte[], int> source, byte[] data, int length)
         {
             // Unico punto de entrada de PCM TX por red en Shared Radio
             // Mode: SessionManager decide si esta sesion es la TxOwner
@@ -596,18 +609,17 @@ namespace QDNH
             // demas oyentes). Si no lo es, el bloque se descarta aqui
             // mismo y jamas llega al AIOC -- la radio no puede mezclar
             // TX de dos operadores a la vez.
-            if (sessions.OnTxAudio(sessionId, data, length))
+            if (sessions.OnTxAudio(sessionId, data, length, source))
                 playback?.Send(data, length);
         }
 
-        private static void MultiNetworkSerialCallback(Guid sessionId, byte[] data, int length)
+        private static void MultiNetworkSerialCallback(Guid sessionId, Action<byte[], int> source, byte[] data, int length)
         {
             // Solo quien tiene el Control Lock puede mandar comandos CAT
             // a la radio (cambiar VFO, modo, etc.) en Shared Radio Mode.
             // El resto de sesiones siguen recibiendo la telemetria/LCD
             // via FanOutSerialRx, pero no pueden escribir.
-            if (sessions.IsControlOwner(sessionId))
-                serialPort?.Send(data, 0, length);
+            sessions.ForwardSerial(sessionId, data, length, (frame, offset, count) => serialPort?.Send(frame, offset, count), source);
         }
 
         private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send) =>

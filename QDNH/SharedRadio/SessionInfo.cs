@@ -12,6 +12,7 @@ namespace QDNH.SharedRadio
     public class SessionInfo
     {
         public Guid Id { get; }
+        public bool SupportsExtensions { get; set; }
         public string Callsign { get; set; }
         public DateTime ConnectedUtc { get; } = DateTime.UtcNow;
         public bool SupportsTxMonitor { get; set; }

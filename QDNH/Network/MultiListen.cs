@@ -5,6 +5,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using System.Threading;
 
 namespace QDNH.Network
 {
@@ -30,19 +32,22 @@ namespace QDNH.Network
     public class MultiListen
     {
         private readonly TcpListener listener;
-        private readonly Action<Guid, byte[], int> callback;
+        private readonly Action<Guid, Action<byte[], int>, byte[], int> callback;
         private readonly Func<Guid, Action<byte[], int>, object> onConnected;
         private readonly Action<Guid, Action<byte[], int>> onDisconnected;
-        private bool closed = false;
+        private volatile bool closed = false;
+        private readonly ConcurrentDictionary<TcpClient, byte> clients = new();
+        private readonly bool dropOldest;
         private readonly Task loop;
 
         public MultiListen(
             int port,
-            Action<Guid, byte[], int> callback,
+            Action<Guid, Action<byte[], int>, byte[], int> callback,
             Func<Guid, Action<byte[], int>, object> onConnected,
-            Action<Guid, Action<byte[], int>> onDisconnected)
+            Action<Guid, Action<byte[], int>> onDisconnected, bool dropOldest = true)
         {
             this.callback = callback;
+            this.dropOldest = dropOldest;
             this.onConnected = onConnected;
             this.onDisconnected = onDisconnected;
             listener = new(IPAddress.Any, port);
@@ -56,6 +61,7 @@ namespace QDNH.Network
             {
                 closed = true;
                 try { listener.Stop(); } catch { }
+                foreach (var client in clients.Keys) client.Dispose();
                 loop.Wait();
             }
         }
@@ -67,7 +73,9 @@ namespace QDNH.Network
                 TcpClient client;
                 try { client = await listener.AcceptTcpClientAsync(); }
                 catch { continue; }
-                _ = Task.Run(() => HandleClient(client));
+                if (clients.Count >= 64) { client.Dispose(); continue; }
+                clients.TryAdd(client, 0);
+                _ = Task.Run(async () => { try { await HandleClient(client); } finally { clients.TryRemove(client, out _); } });
             }
         }
 
@@ -81,18 +89,24 @@ namespace QDNH.Network
                 // mas notable en WAN, donde puede dar la impresion de un
                 // corte de conexion entero en vez de simple latencia.
                 try { client.NoDelay = true; } catch { }
+                client.ReceiveTimeout = 10000;
                 NetworkStream stream = client.GetStream();
 
                 Authenticator auth = new(Vars.Password);
                 try { await stream.WriteAsync(auth.Salt); await stream.FlushAsync(); } catch { return; }
                 byte[] chal = new byte[auth.Hash.Length];
-                for (int i = 0; i < chal.Length; i++)
+                try
                 {
-                    int b;
-                    try { b = stream.ReadByte(); } catch { b = -1; }
-                    if (b < 0) return;
-                    chal[i] = (byte)b;
+                    int received = 0;
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    while (received < chal.Length)
+                    {
+                        int count = await stream.ReadAsync(chal.AsMemory(received), timeout.Token);
+                        if (count == 0) return;
+                        received += count;
+                    }
                 }
+                catch { return; }
                 if (!auth.Challenge(chal)) return;
 
                 byte[] idBytes = new byte[16];
@@ -100,7 +114,7 @@ namespace QDNH.Network
                 while (got < 16)
                 {
                     int n;
-                    try { n = await stream.ReadAsync(idBytes.AsMemory(got, 16 - got)); }
+                    try { n = await stream.ReadAsync(idBytes.AsMemory(got, 16 - got)).AsTask().WaitAsync(TimeSpan.FromSeconds(10)); }
                     catch { n = 0; }
                     if (n <= 0) return;
                     got += n;
@@ -126,7 +140,7 @@ namespace QDNH.Network
                 var queue = Channel.CreateBounded<(byte[] Buffer, int Length)>(
                     new BoundedChannelOptions(16)
                     {
-                        FullMode = BoundedChannelFullMode.DropOldest,
+                        FullMode = dropOldest ? BoundedChannelFullMode.DropOldest : BoundedChannelFullMode.Wait,
                         SingleReader = true,
                     });
 
@@ -135,7 +149,7 @@ namespace QDNH.Network
                     byte[] copy = new byte[length];
                     Array.Copy(data, copy, length);
                     if (!queue.Writer.TryWrite((copy, length)))
-                        Vars.Out($"[SharedRadio] frame descartado (cola llena) sesion={sessionId}");
+                        client.Dispose(); // Nunca perder bytes serie silenciosamente: cerrar el cliente lento.
                 }
 
                 onConnected(sessionId, Send);
@@ -144,8 +158,8 @@ namespace QDNH.Network
                 {
                     await foreach (var item in queue.Reader.ReadAllAsync())
                     {
-                        try { await stream.WriteAsync(item.Buffer.AsMemory(0, item.Length)); await stream.FlushAsync(); }
-                        catch { break; }
+                        try { await stream.WriteAsync(item.Buffer.AsMemory(0, item.Length)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)); }
+                        catch { client.Dispose(); break; }
                     }
                 });
 
@@ -160,7 +174,7 @@ namespace QDNH.Network
                         catch (Exception ex) { lastException = ex; br = -1; }
                         if (br <= 0) break;
                         bytesInThisConn += br;
-                        callback(sessionId, b, br);
+                        callback(sessionId, Send, b, br);
                     }
                 }
                 finally
@@ -172,11 +186,12 @@ namespace QDNH.Network
                     Vars.Out($"[SharedRadio] cliente desconectado sesion={sessionId} " +
                              $"duracion={secs:F1}s recibidos={bytesInThisConn}B motivo={reason}");
                     queue.Writer.TryComplete();
+                    onDisconnected(sessionId, Send);
+                    client.Dispose();
                     // A peer can close its write half while no longer reading.
                     // Do not keep the session (and its TX lock) alive forever
                     // while the outgoing writer is blocked on that socket.
                     try { await sender.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
-                    onDisconnected(sessionId, Send);
                 }
             }
         }

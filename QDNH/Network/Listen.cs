@@ -15,6 +15,15 @@ namespace QDNH.Network
     public class Listen
     {
         private readonly TcpListener listener;
+        public bool IsListening
+        {
+            get
+            {
+                try { return !closed && listener.Server.IsBound && loop != null && !loop.IsCompleted; }
+                catch (ObjectDisposedException) { return false; }
+                catch (SocketException) { return false; }
+            }
+        }
         private readonly Action<byte[], int> callback;
         private TcpClient? client = null;
         private NetworkStream? stream = null;

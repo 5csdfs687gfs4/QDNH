@@ -1,0 +1,8 @@
+{
+  "SchemaVersion": 1,
+  "Operators": [
+    { "UserId": "example-observer", "Callsign": "EJEMPLO-O", "Role": "Observer", "SecretEnvironmentVariable": "QDNH_SECRET_EXAMPLE_OBSERVER" },
+    { "UserId": "example-operator", "Callsign": "EJEMPLO-OP", "Role": "Operator", "SecretEnvironmentVariable": "QDNH_SECRET_EXAMPLE_OPERATOR" },
+    { "UserId": "example-administrator", "Callsign": "EJEMPLO-ADM", "Role": "Administrator", "SecretEnvironmentVariable": "QDNH_SECRET_EXAMPLE_ADMINISTRATOR" }
+  ]
+}

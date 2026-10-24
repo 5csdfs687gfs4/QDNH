@@ -361,3 +361,5 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Pruebas locales de instalación, sin binarios reales
+.test-work/

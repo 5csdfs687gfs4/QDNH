@@ -1,4 +1,4 @@
-﻿using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using QDNH.Language;
 using QDNH.Settings;
@@ -7,14 +7,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-
 namespace QDNH.Audio
 {
     public class PlaybackWASAPI : IPlayback
     {
+        public bool IsResponsive => playback?.PlaybackState == PlaybackState.Playing;
         private readonly WasapiOut? playback;
         private readonly BufferedWaveProvider? provider;
-        public PlaybackWASAPI(MMDevice device) 
+        public PlaybackWASAPI(MMDevice device)
         {
             Exception exception;
             try
@@ -25,7 +25,7 @@ namespace QDNH.Audio
                 playback.Play();
                 return;
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 Vars.Err(Lang.OpenOutputError);
                 exception = e;
@@ -33,7 +33,6 @@ namespace QDNH.Audio
             Close();
             throw exception;
         }
-
         public void Send(byte[] data, int length)
         {
             if (provider != null)
@@ -43,7 +42,13 @@ namespace QDNH.Audio
                 provider.AddSamples(data, 0, length);
             }
         }
-
+        public void ClearPending()
+        {
+            // Detener la reproducción evita que una nueva concesión TX arrastre nuestra cola anterior.
+            playback?.Stop();
+            provider?.ClearBuffer();
+            playback?.Play();
+        }
         public void Close()
         {
             using (playback)

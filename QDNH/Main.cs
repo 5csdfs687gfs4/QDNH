@@ -1,3 +1,4 @@
+using QDNH.Security;
 using Alsa.Net;
 using NAudio.CoreAudioApi;
 using QDNH.Audio;
@@ -39,12 +40,22 @@ namespace QDNH
         // tradicional de un solo usuario (arriba) no se toca.
         private static MultiListen? multiAudioServer = null, multiSerialServer = null;
         private static ControlChannel? controlChannel = null;
-        private static readonly QDNH.SharedRadio.SessionManager sessions = new();
+        private static readonly QDNH.SharedRadio.SessionManager sessions = new(ReleasePhysicalPtt);
+        private static void ReleasePhysicalPtt()
+        {
+            var frame = RadioProtocol.ReleasePtt();
+            serialPort?.Send(frame, 0, frame.Length);
+            playback?.ClearPending();
+        }
         private static UART? serialPort = null;
         private static ICapture? capture = null;
         private static IPlayback? playback = null;
         private static bool commandLine = true;
         private static AudioPlatform audioPlatform = AudioPlatform.None;
+        private static readonly object initGate = new();
+        private static volatile bool initializationComplete;
+        private static long initializedAtTick, lastCaptureTick;
+        private static readonly System.Threading.ManualResetEventSlim hostStopRequested = new(false);
         private static readonly System.Timers.Timer restartTimer = new(86400000);
 
         private static void Out(string s, string suffix = "\n") => Vars.Out(s, suffix);
@@ -52,8 +63,10 @@ namespace QDNH
         private static void Err(string s) => Vars.Err(s);
 
 
-        public static void Run(string[] args)
+        public static void Run(string[] args, bool headless = false)
         {
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => sessions.ReleaseAnyTx("SERVER_STOPPED");
+            Console.CancelKeyPress += (_, _) => { sessions.ReleaseAnyTx("SERVER_STOPPED"); hostStopRequested.Set(); };
             restartTimer.Elapsed += RestartTimer_Elapsed;
             restartTimer.Start();
             if (args.Length > 0)
@@ -82,6 +95,14 @@ namespace QDNH
                 EnumerateDevices();
             }
             Init();
+            if (headless)
+            {
+                string? stopFile = Environment.GetEnvironmentVariable("QDNH_HOST_STOP_FILE");
+                while (!hostStopRequested.Wait(250))
+                    if (!string.IsNullOrWhiteSpace(stopFile) && File.Exists(stopFile)) break;
+                sessions.ReleaseAnyTx("SERVER_STOPPED");
+                return;
+            }
             bool quit = false;
             while (!quit)
             {
@@ -89,6 +110,7 @@ namespace QDNH
                 switch (ExecuteCommand(Vars.In()))
                 {
                     case CommandPostAction.Quit:
+                        sessions.ReleaseAnyTx("SERVER_STOPPED");
                         quit = true;
                         break;
                     case CommandPostAction.Init:
@@ -119,7 +141,7 @@ namespace QDNH
                 string[] p = command.Trim().Split(' ');
                 string p1s = p.Length > 1 ? p[1] : string.Empty;
                 int p1 = int.TryParse(p1s, out int i) ? i : -1;
-                switch (p[0].ToUpper().Replace("-",""))
+                switch (p[0].ToUpper().Replace("-", ""))
                 {
                     case "#":
                         if (Vars.Audio)
@@ -127,6 +149,7 @@ namespace QDNH
                             Vars.Out("Closing Audio");
                             capture?.Close();
                             playback?.Close();
+                            capture = null; playback = null;
                         }
                         break;
                     case "E":
@@ -205,7 +228,7 @@ namespace QDNH
                                 postAction = CommandPostAction.Init;
                             }
                             else
-                            if(p1s.StartsWith("tty"))
+                            if (p1s.StartsWith("tty"))
                             {
                                 Vars.ComPort = p1s;
                                 postAction = CommandPostAction.Init;
@@ -257,7 +280,7 @@ namespace QDNH
                         break;
                     case "M":
                         if (p.Length == 1) { DisplayMode(); break; }
-                        switch(p1s.ToLower())
+                        switch (p1s.ToLower())
                         {
                             case var n when n == "all" || n == "audio" || n == "serial":
                                 Vars.Mode = n;
@@ -323,7 +346,7 @@ namespace QDNH
                     try { id = File.ReadAllText($"/proc/asound/card{i}/id"); } catch { break; }
                     alsaDevices.Add(id.Replace('\n', ' ').Replace('\r', ' ').Trim());
                 }
-            }           
+            }
         }
 
         private static void EnumerateDevices()
@@ -412,7 +435,7 @@ namespace QDNH
                     string sel = fn.Equals(Vars.ComPort) ? "*" : " ";
                     Out($" {sel}{i + 1} - {fn}");
                 }
-                if(Vars.ComPort.StartsWith("tty"))
+                if (Vars.ComPort.StartsWith("tty"))
                     Out($" *F - /dev/{Vars.ComPort}");
             }
         }
@@ -453,7 +476,7 @@ namespace QDNH
         }
 
         private static void DisplayAll()
-        {            
+        {
             DisplayMode();
             DisplayInputs();
             DisplayOutputs();
@@ -466,6 +489,22 @@ namespace QDNH
 
         private static void Init()
         {
+            lock (initGate) InitLocked();
+        }
+
+        private static void InitLocked()
+        {
+            initializationComplete = false;
+            System.Threading.Interlocked.Exchange(ref lastCaptureTick, 0);
+            sessions.ReleaseAnyTx("SERVER_RECONFIGURED");
+            controlChannel?.Close(); controlChannel = null;
+            multiAudioServer?.Close(); multiAudioServer = null;
+            multiSerialServer?.Close(); multiSerialServer = null;
+            audioServer?.Close(); audioServer = null; serialServer?.Close(); serialServer = null;
+            var operatorAuthentication = OperatorAuthentication.Load(Vars.OperatorAccountsFile);
+            if (operatorAuthentication != null && !Vars.SharedRadioMode)
+                throw new InvalidOperationException("Las cuentas individuales requieren SharedRadioMode=True; no se abrirán listeners sin seguridad.");
+            sessions.ResetForReconfigure(operatorAuthentication != null);
             restartTimer.Interval++;
             restartTimer.Interval--;
             commandLine = false;
@@ -475,17 +514,18 @@ namespace QDNH
             if (Vars.Serial)
             {
                 serialPort?.Close();
+                serialPort = null;
                 serialServer?.Close();
                 serialServer = null;
                 multiSerialServer?.Close();
                 multiSerialServer = null;
                 if (!Vars.ComPort.Equals(Lang.Disabled))
                 {
-                    try { serialPort = new(Vars.ComPort, SerialDataCallback); } catch { }
+                    try { serialPort = new(Vars.ComPort, SerialDataCallback, () => sessions.ReleaseAnyTx("SERIAL_LOST")); } catch { }
                 }
                 if (Vars.SharedRadioMode)
                 {
-                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected); } catch { }
+                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected, false, operatorAuthentication); } catch { }
                 }
                 else
                 {
@@ -500,10 +540,11 @@ namespace QDNH
                 multiAudioServer = null;
                 capture?.Close();
                 playback?.Close();
+                capture = null; playback = null;
                 if (audioPlatform == AudioPlatform.ALSA) ALSA.Configure();
                 if (Vars.SharedRadioMode)
                 {
-                    try { multiAudioServer = new(Vars.NetworkPort, MultiNetworkAudioCallback, MultiAudioConnected, MultiAudioDisconnected); } catch { }
+                    try { multiAudioServer = new(Vars.NetworkPort, MultiNetworkAudioCallback, MultiAudioConnected, MultiAudioDisconnected, true, operatorAuthentication); } catch { }
                 }
                 else
                 {
@@ -542,13 +583,41 @@ namespace QDNH
             controlChannel = null;
             if (Vars.SharedRadioMode)
             {
-                try { controlChannel = new(Vars.NetworkPort + 2, sessions); } catch { }
+                sessions.HardwareStatus = () => (serialPort?.IsConnected == true, capture != null, playback != null);
+                try { controlChannel = new(Vars.NetworkPort + 2, sessions, operatorAuthentication); } catch { }
             }
+            System.Threading.Interlocked.Exchange(ref initializedAtTick, Stopwatch.GetTimestamp());
+            initializationComplete = true;
         }
 
 
+        public static QDNH.Hosting.LocalHealthSnapshot ProbeLocalHealth()
+        {
+            var state = sessions.ReadLocalState();
+            bool serialExpected = Vars.Serial && !Vars.ComPort.Equals(Lang.Disabled);
+            bool captureExpected = Vars.Audio && !Vars.AudioInput.Equals(Lang.Disabled);
+            bool playbackExpected = Vars.Audio && !Vars.AudioOutput.Equals(Lang.Disabled);
+            bool serialConnected = serialPort?.IsConnected == true;
+            bool audioListening = Vars.SharedRadioMode ? multiAudioServer?.IsListening == true : audioServer?.IsListening == true;
+            bool serialListening = Vars.SharedRadioMode ? multiSerialServer?.IsListening == true : serialServer?.IsListening == true;
+            bool controlListening = controlChannel?.IsListening == true;
+            var listeners = new QDNH.Hosting.ListenerReadiness(Vars.Audio, audioListening, Vars.Serial, serialListening, Vars.SharedRadioMode, controlListening);
+            bool serialResponsive = serialPort?.ReadResponsive == true;
+            long now = Stopwatch.GetTimestamp();
+            long lastCapture = System.Threading.Interlocked.Read(ref lastCaptureTick);
+            bool captureRecent = lastCapture > 0 && (now - lastCapture) / (double)Stopwatch.Frequency < 15;
+            bool captureGrace = (now - System.Threading.Interlocked.Read(ref initializedAtTick)) / (double)Stopwatch.Frequency < 15;
+            bool healthy = listeners.AllReady && (!serialExpected || (serialConnected && serialResponsive)) &&
+                (!captureExpected || (capture != null && (captureGrace || captureRecent))) &&
+                (!playbackExpected || (playback != null && playback.IsResponsive));
+            return new(initializationComplete ? (healthy ? "Running" : "Degraded") : "Initializing",
+                serialExpected, serialConnected, captureExpected, capture != null, playbackExpected, playback != null,
+                state.Operators, state.TxActive, captureRecent, serialResponsive, audioListening, serialListening, controlListening);
+        }
+
         private static void CaptureCallback(byte[] data, int length)
         {
+            System.Threading.Interlocked.Exchange(ref lastCaptureTick, Stopwatch.GetTimestamp());
             // RX real de la radio (microfono/discriminador del AIOC hacia
             // la red): en modo tradicional va solo al unico cliente
             // conectado; en Shared Radio Mode se reparte a TODAS las
@@ -587,7 +656,7 @@ namespace QDNH
         // critico hacia el AIOC (playback/serialPort) o se descarta.
         // ------------------------------------------------------------
 
-        private static void MultiNetworkAudioCallback(Guid sessionId, byte[] data, int length)
+        private static void MultiNetworkAudioCallback(Guid sessionId, Action<byte[], int> source, byte[] data, int length)
         {
             // Unico punto de entrada de PCM TX por red en Shared Radio
             // Mode: SessionManager decide si esta sesion es la TxOwner
@@ -596,28 +665,26 @@ namespace QDNH
             // demas oyentes). Si no lo es, el bloque se descarta aqui
             // mismo y jamas llega al AIOC -- la radio no puede mezclar
             // TX de dos operadores a la vez.
-            if (sessions.OnTxAudio(sessionId, data, length))
-                playback?.Send(data, length);
+            sessions.ForwardTxAudio(sessionId, data, length, (pcm, count) => playback?.Send(pcm, count), source);
         }
 
-        private static void MultiNetworkSerialCallback(Guid sessionId, byte[] data, int length)
+        private static void MultiNetworkSerialCallback(Guid sessionId, Action<byte[], int> source, byte[] data, int length)
         {
             // Solo quien tiene el Control Lock puede mandar comandos CAT
             // a la radio (cambiar VFO, modo, etc.) en Shared Radio Mode.
             // El resto de sesiones siguen recibiendo la telemetria/LCD
             // via FanOutSerialRx, pero no pueden escribir.
-            if (sessions.IsControlOwner(sessionId))
-                serialPort?.Send(data, 0, length);
+            sessions.ForwardSerial(sessionId, data, length, (frame, offset, count) => serialPort?.Send(frame, offset, count), source);
         }
 
-        private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send) =>
-            sessions.AttachAudio(sessionId, send);
+        private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send, OperatorPrincipal? principal) =>
+            sessions.AttachAudio(sessionId, send, principal);
 
         private static void MultiAudioDisconnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.OnAudioChannelClosed(sessionId, send);
 
-        private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send) =>
-            sessions.AttachSerial(sessionId, send);
+        private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send, OperatorPrincipal? principal) =>
+            sessions.AttachSerial(sessionId, send, principal);
 
         private static void MultiSerialDisconnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.OnSerialChannelClosed(sessionId, send);

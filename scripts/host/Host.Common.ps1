@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 function Resolve-HostRoot([string]$Path) {
     $resolved = [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
@@ -37,7 +37,7 @@ function Assert-NoRunningChild([string]$Root) {
         $identity = Get-Content -Raw -LiteralPath $marker | ConvertFrom-Json
         $running = Get-Process -Id $identity.ProcessId -ErrorAction SilentlyContinue
         if ($null -ne $running -and $running.StartTime.ToUniversalTime().Ticks -eq [long]$identity.StartTimeUtcTicks) {
-            throw 'QDNH sigue activo en este host. Espere la salida limpia antes de iniciar otra instancia o cambiar versi�n.'
+            throw 'QDNH sigue activo en este host. Espere la salida limpia antes de iniciar otra instancia o cambiar versión.'
         }
     }
 }
@@ -50,4 +50,10 @@ function Assert-HostStopped([string]$Root) {
         catch { throw 'El supervisor está activo. Solicite parada y espere antes de instalar o revertir.' }
         finally { if ($null -ne $handle) { $handle.Dispose() } }
     }
+}
+function Assert-SerialOnlyConfiguration([string]$Root) {
+    $lines=Get-Content -LiteralPath (Get-HostPath $Root 'state/default.conf')
+    $mode='all'
+    for ($i=0;$i+1 -lt $lines.Count;$i+=2) { if ($lines[$i] -eq 'Mode') { $mode=$lines[$i+1] } }
+    if ($mode -ine 'serial') { throw 'El arranque Session 0 de modo serie requiere Mode=serial en la configuración.' }
 }

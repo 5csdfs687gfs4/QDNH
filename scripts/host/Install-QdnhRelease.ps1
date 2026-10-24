@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess)]
+﻿[CmdletBinding(SupportsShouldProcess)]
 param([Parameter(Mandatory)][string]$SourcePackage,[Parameter(Mandatory)][string]$HostRoot,[Parameter(Mandatory)][string]$ReleaseName,[string]$InitialConfig)
 . "$PSScriptRoot/Host.Common.ps1"
 $root = Resolve-HostRoot $HostRoot

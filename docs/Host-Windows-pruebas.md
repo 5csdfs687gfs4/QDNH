@@ -12,9 +12,9 @@ Identificar primero ejecutable/configuración activos y guardar una copia indepe
 
 ## Supervisión en sesión del usuario
 
-`Start-QdnhHost.ps1 -HostRoot <carpeta> -Resume` arranca en el usuario conectado, mantiene stdin abierto para evitar bucles de EOF y registra stdout/stderr. Rechaza Session 0. Reinicia salidas con error hasta MaximumRestarts (5 por defecto) con espera creciente; salida normal no se reinicia. No confirma que WASAPI/AIOC estén operativos: comprobar audio y radio en esa misma sesión, bloqueo de pantalla y desconexión de usuario antes de uso diario.
+`Start-QdnhHost.ps1 -HostRoot <carpeta> -Resume` arranca en el usuario conectado, mantiene stdin abierto para evitar bucles de EOF y registra stdout/stderr. Por defecto rechaza Session 0; las opciones explicitas de prueba estan documentadas en Guardian-y-arranque.md. Reinicia salidas con error hasta MaximumRestarts (5 por defecto) con espera creciente; salida normal no se reinicia. No confirma que WASAPI/AIOC estén operativos: comprobar audio y radio en esa misma sesión, bloqueo de pantalla y desconexión de usuario antes de uso diario.
 
-`Stop-QdnhHost.ps1 -HostRoot <carpeta>` solicita Q y espera salida limpia. Si no responde, el supervisor mantiene la espera y deja aviso para revisar PTT/hardware; no fuerza la terminación de radio. El cerrojo y la identidad PID/fecha impiden lanzar otra instancia supervisada o actualizar mientras ese proceso siga activo. Un QDNH abierto fuera de estos scripts exige comprobación manual.
+`Stop-QdnhHost.ps1 -HostRoot <carpeta>` solicita Q y espera salida limpia. En parada manual, si no responde, el supervisor mantiene la espera para revisar PTT/hardware. Ante bloqueo detectado automaticamente se permite terminar solo la instancia supervisada y relanzarla, segun Guardian-y-arranque.md. El cerrojo y la identidad PID/fecha impiden lanzar otra instancia supervisada o actualizar mientras ese proceso siga activo. Un QDNH abierto fuera de estos scripts exige comprobación manual.
 
 `Register-QdnhLogonTask.ps1 -HostRoot <carpeta> -TaskName QDNH-Pruebas -WhatIf` prepara una tarea al iniciar sesión del usuario actual. Sin WhatIf registra la tarea, sin arrancarla ahora. Usa LogonType Interactive y privilegios normales; no almacena contraseñas, no activa inicio automático de Windows ni instala un servicio. Si el usuario cierra sesión, la continuidad de audio no está garantizada. No registrar sobre una tarea existente. Para retirar la tarea, usar el Programador de tareas con su nombre exacto después de detener el host.
 
@@ -31,3 +31,6 @@ Los logs y backups se conservan para diagnóstico. Revisar retención/tamaño de
 Para comprobar además supervisión/stdin/parada, publicar `scripts/host/fixtures/ConsoleHost/Fixture.csproj` en un directorio temporal y pasar ese directorio con `-SupervisorFixture <directorio>`. Es un programa de consola que solo espera Q: no referencia radio ni audio. La prueba arranca ese doble como proceso oculto, verifica que sigue vivo con stdin abierto, solicita parada y comprueba su salida. No registra tareas programadas. No pasar el paquete real como SupervisorFixture.
 
 Pendientes de despliegue real: identificar/guardar instalación NucBox, validar puertos/dispositivos, aplicar decisión de acceso privado y secretos por un canal autorizado, probar PTT y dos móviles, validar sesión prolongada/WASAPI y dejar selección de versión anterior comprobada.
+
+
+La vigilancia de progreso, modo headless, reinicio por heartbeat congelado y alternativas de arranque Windows estan detallados en Guardian-y-arranque.md. La prueba de consola ampliada verifica una primera instancia viva pero congelada, su sustitucion y salida limpia de la segunda.

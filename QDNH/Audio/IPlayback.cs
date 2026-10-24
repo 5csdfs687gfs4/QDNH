@@ -7,6 +7,7 @@ namespace QDNH.Audio
 {
     public interface IPlayback
     {
+        bool IsResponsive { get; }
         void Send(byte[] data, int length);
         void Close();
         void ClearPending();

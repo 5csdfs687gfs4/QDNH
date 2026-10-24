@@ -11,6 +11,7 @@ namespace QDNH.Audio
 {
     public class PlaybackWASAPI : IPlayback
     {
+        public bool IsResponsive => playback?.PlaybackState == PlaybackState.Playing;
         private readonly WasapiOut? playback;
         private readonly BufferedWaveProvider? provider;
         public PlaybackWASAPI(MMDevice device)

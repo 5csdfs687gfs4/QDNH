@@ -1,4 +1,4 @@
-[CmdletBinding()]
+ï»¿[CmdletBinding()]
 param([Parameter(Mandatory)][string]$ScratchRoot,[string]$SupervisorFixture)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -36,19 +36,29 @@ if ($SupervisorFixture) {
     $supervisedRoot=Join-Path $testRoot 'supervised-host'
     & "$PSScriptRoot/Install-QdnhRelease.ps1" -SourcePackage $SupervisorFixture -HostRoot $supervisedRoot -ReleaseName 'fixture' -InitialConfig $config | Out-Null
     $supervisorScript=Join-Path $PSScriptRoot 'Start-QdnhHost.ps1'
-    $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+$supervisorScript+'" -HostRoot "'+$supervisedRoot+'" -MaximumRestarts 0'
+    Set-Content -LiteralPath (Join-Path $supervisedRoot 'state/fixture-freeze-once.flag') -Value 'freeze'
+    $arguments='-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "'+$supervisorScript+'" -HostRoot "'+$supervisedRoot+'" -MaximumRestarts 2 -StartupGraceSeconds 3 -HeartbeatTimeoutSeconds 1 -GracefulStopSeconds 1 -BackoffBaseSeconds 1 -DegradedTimeoutSeconds 0'
     $supervisor=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WindowStyle Hidden -PassThru
     try {
-        $deadline=[DateTime]::UtcNow.AddSeconds(10)
+        $deadline=[DateTime]::UtcNow.AddSeconds(15)
+        $startsPath=Join-Path $supervisedRoot 'state/fixture-starts.log'
+        $starts=@()
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $startsPath) { $starts=@(Get-Content -LiteralPath $startsPath) }
+            if ($starts.Count -ge 2) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if ($starts.Count -lt 2) { throw 'El guardian no reinicio el proceso vivo con heartbeat congelado.' }
+        $firstPid=[int]($starts[0].Split(' ')[0])
+        if (Get-Process -Id $firstPid -ErrorAction SilentlyContinue) { throw 'La instancia congelada sigue viva.' }
         $marker=Join-Path $supervisedRoot 'child.json'
-        while (-not (Test-Path -LiteralPath $marker) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
-        if (-not (Test-Path -LiteralPath $marker)) { throw 'No arrancó el doble de supervisor.' }
         $identity=Get-Content -Raw -LiteralPath $marker | ConvertFrom-Json
-        Start-Sleep -Milliseconds 400
-        if (-not (Get-Process -Id $identity.ProcessId -ErrorAction SilentlyContinue)) { throw 'El stdin del doble no permanece abierto.' }
+        if (-not (Get-Process -Id $identity.ProcessId -ErrorAction SilentlyContinue)) { throw 'La segunda instancia no sigue viva.' }
+        $guardLog=Get-ChildItem -LiteralPath (Join-Path $supervisedRoot 'logs') -Filter '*.log' | ForEach-Object { Get-Content -LiteralPath $_.FullName }
+        if (-not ($guardLog -match 'heartbeat sin avanzar')) { throw 'Falta evidencia de deteccion del bloqueo real.' }
         & "$PSScriptRoot/Stop-QdnhHost.ps1" -HostRoot $supervisedRoot
-        if (-not $supervisor.WaitForExit(10000)) { throw 'El doble no confirmó parada limpia.' }
-        if ($supervisor.ExitCode -ne 0) { throw 'El supervisor terminó con error.' }
+        if (-not $supervisor.WaitForExit(10000)) { throw 'El doble no confirmÃ³ parada limpia.' }
+        if ($supervisor.ExitCode -ne 0) { throw 'El supervisor terminÃ³ con error.' }
         if (Get-Process -Id $identity.ProcessId -ErrorAction SilentlyContinue) { throw 'El doble sigue abierto tras la parada.' }
         $supervisorVerified=$true
     } finally {
@@ -63,4 +73,4 @@ foreach ($file in Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.ps1') {
     if ($parseErrors.Count) { throw "Errores de sintaxis en $($file.Name): $parseErrors" }
     $parseCount++
 }
-[pscustomobject]@{ Success=$true; Checks=6; ScriptsParsed=$parseCount; TestDirectory=$testRoot; HardwareAccessed=$false; ScheduledTasksChanged=$false; SupervisorFixtureVerified=$supervisorVerified } | ConvertTo-Json
+[pscustomobject]@{ Success=$true; Checks=6; ScriptsParsed=$parseCount; TestDirectory=$testRoot; HardwareAccessed=$false; ScheduledTasksChanged=$false; SupervisorFixtureVerified=$supervisorVerified; FrozenHeartbeatRestartVerified=$supervisorVerified } | ConvertTo-Json

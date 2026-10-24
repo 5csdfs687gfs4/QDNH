@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.IO.Ports;
 using QDNH.Settings;
 namespace QDNH.Serial;
 public interface ISerialConnection : IDisposable
 {
+    bool HasReadTimeout => true;
     int Read(byte[] buffer);
     void Write(byte[] buffer, int offset, int length);
 }
@@ -16,8 +18,17 @@ public sealed class UART : IDisposable
     private readonly Task loop;
     private ISerialConnection? connection;
     private bool closed;
+    private long lastReadCycle = Stopwatch.GetTimestamp();
     private readonly int retryMilliseconds;
     public bool IsConnected { get { lock (gate) return !closed && connection != null; } }
+    public bool ReadResponsive
+    {
+        get
+        {
+            lock (gate) return !closed && connection != null && (!connection.HasReadTimeout ||
+                (Stopwatch.GetTimestamp() - Interlocked.Read(ref lastReadCycle)) / (double)Stopwatch.Frequency < 10);
+        }
+    }
     public UART(string name, Action<byte[], int> receive, Action? disconnected = null)
         : this(() => new DeviceConnection(name), receive, disconnected) { }
     public UART(Func<ISerialConnection> open, Action<byte[], int> receive, Action? disconnected = null, int retryMilliseconds = 2000)
@@ -25,6 +36,12 @@ public sealed class UART : IDisposable
         this.open = open; this.receive = receive; this.disconnected = disconnected;
         this.retryMilliseconds = retryMilliseconds;
         connection = open();
+        try
+        {
+            var release = RadioProtocol.ReleasePtt();
+            connection.Write(release, 0, release.Length);
+        }
+        catch { connection.Dispose(); throw; }
         loop = Task.Run(Loop);
     }
     public void Send(byte[] data, int offset, int length)
@@ -77,6 +94,7 @@ public sealed class UART : IDisposable
             }
             try
             {
+                Interlocked.Exchange(ref lastReadCycle, Stopwatch.GetTimestamp());
                 int count = current.Read(buffer);
                 if (count <= 0) { Lose(current); continue; }
                 try { receive(buffer.AsSpan(0, count).ToArray(), count); }
@@ -102,6 +120,7 @@ public sealed class UART : IDisposable
     {
         private readonly SerialPort? port;
         private readonly FileStream? file;
+        public bool HasReadTimeout => port != null;
         public DeviceConnection(string name)
         {
             if (name.StartsWith("tty")) file = File.Open($"/dev/{name}", FileMode.Open, FileAccess.ReadWrite, FileShare.None);

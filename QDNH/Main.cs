@@ -53,6 +53,9 @@ namespace QDNH
         private static bool commandLine = true;
         private static AudioPlatform audioPlatform = AudioPlatform.None;
         private static readonly object initGate = new();
+        private static volatile bool initializationComplete;
+        private static long initializedAtTick, lastCaptureTick;
+        private static readonly System.Threading.ManualResetEventSlim hostStopRequested = new(false);
         private static readonly System.Timers.Timer restartTimer = new(86400000);
 
         private static void Out(string s, string suffix = "\n") => Vars.Out(s, suffix);
@@ -60,10 +63,10 @@ namespace QDNH
         private static void Err(string s) => Vars.Err(s);
 
 
-        public static void Run(string[] args)
+        public static void Run(string[] args, bool headless = false)
         {
             AppDomain.CurrentDomain.ProcessExit += (_, _) => sessions.ReleaseAnyTx("SERVER_STOPPED");
-            Console.CancelKeyPress += (_, _) => sessions.ReleaseAnyTx("SERVER_STOPPED");
+            Console.CancelKeyPress += (_, _) => { sessions.ReleaseAnyTx("SERVER_STOPPED"); hostStopRequested.Set(); };
             restartTimer.Elapsed += RestartTimer_Elapsed;
             restartTimer.Start();
             if (args.Length > 0)
@@ -92,6 +95,14 @@ namespace QDNH
                 EnumerateDevices();
             }
             Init();
+            if (headless)
+            {
+                string? stopFile = Environment.GetEnvironmentVariable("QDNH_HOST_STOP_FILE");
+                while (!hostStopRequested.Wait(250))
+                    if (!string.IsNullOrWhiteSpace(stopFile) && File.Exists(stopFile)) break;
+                sessions.ReleaseAnyTx("SERVER_STOPPED");
+                return;
+            }
             bool quit = false;
             while (!quit)
             {
@@ -483,6 +494,8 @@ namespace QDNH
 
         private static void InitLocked()
         {
+            initializationComplete = false;
+            System.Threading.Interlocked.Exchange(ref lastCaptureTick, 0);
             sessions.ReleaseAnyTx("SERVER_RECONFIGURED");
             controlChannel?.Close(); controlChannel = null;
             multiAudioServer?.Close(); multiAudioServer = null;
@@ -573,11 +586,34 @@ namespace QDNH
                 sessions.HardwareStatus = () => (serialPort?.IsConnected == true, capture != null, playback != null);
                 try { controlChannel = new(Vars.NetworkPort + 2, sessions, operatorAuthentication); } catch { }
             }
+            System.Threading.Interlocked.Exchange(ref initializedAtTick, Stopwatch.GetTimestamp());
+            initializationComplete = true;
         }
 
 
+        public static QDNH.Hosting.LocalHealthSnapshot ProbeLocalHealth()
+        {
+            var state = sessions.ReadLocalState();
+            bool serialExpected = Vars.Serial && !Vars.ComPort.Equals(Lang.Disabled);
+            bool captureExpected = Vars.Audio && !Vars.AudioInput.Equals(Lang.Disabled);
+            bool playbackExpected = Vars.Audio && !Vars.AudioOutput.Equals(Lang.Disabled);
+            bool serialConnected = serialPort?.IsConnected == true;
+            bool serialResponsive = serialPort?.ReadResponsive == true;
+            long now = Stopwatch.GetTimestamp();
+            long lastCapture = System.Threading.Interlocked.Read(ref lastCaptureTick);
+            bool captureRecent = lastCapture > 0 && (now - lastCapture) / (double)Stopwatch.Frequency < 15;
+            bool captureGrace = (now - System.Threading.Interlocked.Read(ref initializedAtTick)) / (double)Stopwatch.Frequency < 15;
+            bool healthy = (!serialExpected || (serialConnected && serialResponsive)) &&
+                (!captureExpected || (capture != null && (captureGrace || captureRecent))) &&
+                (!playbackExpected || (playback != null && playback.IsResponsive));
+            return new(initializationComplete ? (healthy ? "Running" : "Degraded") : "Initializing",
+                serialExpected, serialConnected, captureExpected, capture != null, playbackExpected, playback != null,
+                state.Operators, state.TxActive, captureRecent, serialResponsive);
+        }
+
         private static void CaptureCallback(byte[] data, int length)
         {
+            System.Threading.Interlocked.Exchange(ref lastCaptureTick, Stopwatch.GetTimestamp());
             // RX real de la radio (microfono/discriminador del AIOC hacia
             // la red): en modo tradicional va solo al unico cliente
             // conectado; en Shared Radio Mode se reparte a TODAS las

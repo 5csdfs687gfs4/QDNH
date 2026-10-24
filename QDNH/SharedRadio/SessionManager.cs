@@ -442,6 +442,10 @@ namespace QDNH.SharedRadio
         }
 
         // Solo se envían extensiones a clientes que anuncian protocolo 2.
+        public (int Operators, bool TxActive) ReadLocalState()
+        {
+            lock (sync) return (sessions.Values.Count(s => s.SendControl != null), TxOwnerSessionId != null);
+        }
         public OperatorsStateMessage GetOperators()
         {
             lock (sync) return new(sessions.Values.Where(s => s.SendControl != null).Select(s => new OperatorInfo(s.Id, s.Callsign,

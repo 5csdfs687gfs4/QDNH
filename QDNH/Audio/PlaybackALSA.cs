@@ -13,6 +13,7 @@ namespace QDNH.Audio
         private readonly AlsaStream stream = new(32768, (Vars.LatencyMils * 441) / 10);
         private readonly CancellationTokenSource tokenSource = new();
         private readonly Task? bgTask = null;
+        public bool IsResponsive => bgTask != null && !bgTask.IsCompleted && !tokenSource.IsCancellationRequested;
         public PlaybackALSA()
         {
             if (ALSA.Device is ISoundDevice device)

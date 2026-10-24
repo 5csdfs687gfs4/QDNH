@@ -163,7 +163,7 @@ namespace QDNH.Settings
         }
         public static void Out(string s, string suffix = "\n") => Console.Write(s + suffix);
         public static void Err(string s) => Console.Error.WriteLine($"{Lang.Error}: {s}");
-        public static string In() => Console.ReadLine() ?? string.Empty;
+        public static string In() => Console.ReadLine() ?? "Q";
         public static int Clamp(this int val, int min, int max) => val < min ? min : val > max ? max : val;
         public static string Element(this string[] array, int element) => element < array.Length && element >= 0 ? array[element] : string.Empty;
         public static string Reformat(this string s) => s.Replace(@"\t", "\t").Replace(@"\n", "\n").Replace(@"\r", "\r");

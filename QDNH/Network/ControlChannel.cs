@@ -1,3 +1,4 @@
+using QDNH.Security;
 using QDNH.SharedRadio;
 using QDNH.Settings;
 using System;
@@ -8,7 +9,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Channels;
 using System.Collections.Concurrent;
-
 namespace QDNH.Network
 {
     /// <summary>
@@ -27,20 +27,20 @@ namespace QDNH.Network
     public class ControlChannel
     {
         private readonly TcpListener listener;
+        private readonly OperatorAuthentication? authentication;
         private readonly SessionManager sessions;
         private volatile bool closed = false;
         private readonly ConcurrentDictionary<TcpClient, byte> clients = new();
         private readonly Task loop;
         public int BoundPort => ((IPEndPoint)listener.LocalEndpoint).Port;
-
-        public ControlChannel(int port, SessionManager sessions)
+        public ControlChannel(int port, SessionManager sessions, OperatorAuthentication? authentication = null)
         {
             this.sessions = sessions;
+            this.authentication = authentication;
             listener = new(IPAddress.Any, port);
             listener.Start();
             loop = Loop();
         }
-
         public void Close()
         {
             using (loop)
@@ -51,7 +51,6 @@ namespace QDNH.Network
                 loop.Wait();
             }
         }
-
         private async Task Loop()
         {
             while (!closed)
@@ -66,14 +65,12 @@ namespace QDNH.Network
                 _ = Task.Run(async () => { try { await HandleClient(client); } finally { clients.TryRemove(client, out _); } });
             }
         }
-
         private async Task HandleClient(TcpClient client)
         {
             using (client)
             {
                 client.NoDelay = true; client.ReceiveTimeout = 10000;
                 NetworkStream stream = client.GetStream();
-
                 // Mismo reto salt+SHA256 que ya usan los otros dos
                 // canales (Network/Authenticator.cs, sin tocar).
                 Authenticator auth = new(Vars.Password);
@@ -91,8 +88,8 @@ namespace QDNH.Network
                     }
                 }
                 catch { return; }
-                if (!auth.Challenge(chal)) return;
-
+                OperatorPrincipal? principal = authentication?.Authenticate(chal, auth.Salt);
+                if (authentication != null ? principal == null : !auth.Challenge(chal)) return;
                 SessionInfo? session = null;
                 Action<byte[]>? sendToThis = null;
                 // Every response for this connection shares one framed stream.
@@ -115,7 +112,6 @@ namespace QDNH.Network
                         var msg = session == null ? await ReadMessage(stream).WaitAsync(TimeSpan.FromSeconds(10)) : await ReadMessage(stream);
                         if (msg == null) break;
                         var (type, payload) = msg.Value;
-
                         if (session == null)
                         {
                             // El primer mensaje de una conexion nueva
@@ -124,23 +120,21 @@ namespace QDNH.Network
                             if (type != ControlMsgType.Hello) break;
                             var hello = JsonSerializer.Deserialize<HelloMessage>(payload);
                             if (hello == null) break;
-
                             sendToThis = frame => { if (!outgoing.Writer.TryWrite(frame)) client.Dispose(); };
-                            session = sessions.RegisterOrAttach(hello.SessionId, hello.Callsign, hello.SupportsTxMonitor, sendToThis, hello.ProtocolVersion);
+                            session = sessions.RegisterOrAttach(hello.SessionId, hello.Callsign, hello.SupportsTxMonitor, sendToThis, hello.ProtocolVersion, principal);
                             continue;
                         }
-
                         if (sendToThis == null) break;
                         bool current = sessions.ExecuteControl(session.Id, sendToThis, () =>
                         {
                             switch (type)
                             {
                                 case ControlMsgType.Hello:
-                                var update = JsonSerializer.Deserialize<HelloMessage>(payload);
-                                if (update != null && update.SessionId == session.Id)
-                                    sessions.RegisterOrAttach(session.Id, update.Callsign, update.SupportsTxMonitor, sendToThis, update.ProtocolVersion);
-                                break;
-                            case ControlMsgType.HealthRequest: sessions.SendHealth(session.Id); break;
+                                    var update = JsonSerializer.Deserialize<HelloMessage>(payload);
+                                    if (update != null && update.SessionId == session.Id)
+                                        sessions.RegisterOrAttach(session.Id, update.Callsign, update.SupportsTxMonitor, sendToThis, update.ProtocolVersion, principal);
+                                    break;
+                                case ControlMsgType.HealthRequest: sessions.SendHealth(session.Id); break;
                                 case ControlMsgType.OperatorsRequest: sessions.SendOperators(session.Id); break;
                                 case ControlMsgType.QueueJoin: sessions.QueueControl(session.Id, true); break;
                                 case ControlMsgType.QueueLeave: sessions.QueueControl(session.Id, false); break;
@@ -173,7 +167,6 @@ namespace QDNH.Network
                 }
             }
         }
-
         private static async Task<(ControlMsgType, byte[])?> ReadMessage(NetworkStream stream)
         {
             byte[] header = new byte[5];
@@ -185,7 +178,6 @@ namespace QDNH.Network
             if (len > 0 && !await ReadExact(stream, payload, len)) return null;
             return (type, payload);
         }
-
         private static async Task<bool> ReadExact(NetworkStream stream, byte[] buffer, int count)
         {
             int got = 0;
@@ -199,6 +191,5 @@ namespace QDNH.Network
             }
             return true;
         }
-
     }
 }

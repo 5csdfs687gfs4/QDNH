@@ -1,4 +1,4 @@
-﻿using Alsa.Net;
+using Alsa.Net;
 using QDNH.Language;
 using QDNH.Settings;
 using System;
@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-
 namespace QDNH.Audio
 {
     public class PlaybackALSA : IPlayback
@@ -33,6 +32,7 @@ namespace QDNH.Audio
                 });
             }
         }
+        public void ClearPending() => stream.ClearPending();
         public void Close()
         {
             using (bgTask) using (tokenSource) using (stream)
@@ -48,5 +48,4 @@ namespace QDNH.Audio
                 stream.Append(data, length);
         }
     }
-
 }

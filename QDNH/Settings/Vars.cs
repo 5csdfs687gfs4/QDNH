@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-
 namespace QDNH.Settings
 {
     public static class Vars
@@ -15,7 +14,6 @@ namespace QDNH.Settings
         public const string confExt = ".conf";
         private static string config = "default";
         private static string mode = "all";
-
         public static bool Loaded { get; private set; } = false;
         public static string Config { get => config; set => config = value; }
         public static string ConfigFile => $"{config}{confExt}";
@@ -41,13 +39,13 @@ namespace QDNH.Settings
         public static string ComPort { get; set; } = Lang.Disabled;
         public static int NetworkPort { get; set; } = defaultPort;
         public static string Password { get; set; } = string.Empty;
+        public static string OperatorAccountsFile { get; set; } = string.Empty;
         public static int AudioInputDevice { get; set; } = -1;
         public static int AudioOutputDevice { get; set; } = -1;
         public static bool AllowSaveConfig { get; set; } = true;
         public static WaveFormat WaveFormat { get; } = new(22050, 16, 1);
         public static bool Audio { get; private set; } = true;
         public static bool Serial { get; private set; } = true;
-
         // Shared Radio Mode: cuando esta activo, Main.cs usa MultiListen
         // (audio/serie multi-cliente) + ControlChannel + SessionManager en
         // vez de los Listen de siempre. El modo tradicional de un solo
@@ -70,7 +68,6 @@ namespace QDNH.Settings
         private static int latency = defaultLatency;
         private static double latencysecs = defaultLatency / 1000.0;
 
-
         public static void Save()
         {
             if (AllowSaveConfig)
@@ -88,6 +85,7 @@ namespace QDNH.Settings
                         NetworkPort.ToString(),
                         nameof(Password),
                         Password,
+                        nameof(OperatorAccountsFile), OperatorAccountsFile,
                         nameof(LatencyMils),
                         LatencyMils.ToString(),
                         nameof(Language),
@@ -106,7 +104,6 @@ namespace QDNH.Settings
                 }
             }
         }
-
         public static void Load()
         {
             Loaded = true;
@@ -134,6 +131,7 @@ namespace QDNH.Settings
                         case nameof(ComPort):
                             ComPort = value;
                             break;
+                        case nameof(OperatorAccountsFile): OperatorAccountsFile = value; break;
                         case nameof(Password):
                             Password = value;
                             break;
@@ -163,17 +161,11 @@ namespace QDNH.Settings
                 Err($"{Lang.ReadError}: {ConfigFile}");
             }
         }
-
         public static void Out(string s, string suffix = "\n") => Console.Write(s + suffix);
-
         public static void Err(string s) => Console.Error.WriteLine($"{Lang.Error}: {s}");
-
         public static string In() => Console.ReadLine() ?? string.Empty;
-
         public static int Clamp(this int val, int min, int max) => val < min ? min : val > max ? max : val;
-
         public static string Element(this string[] array, int element) => element < array.Length && element >= 0 ? array[element] : string.Empty;
-
         public static string Reformat(this string s) => s.Replace(@"\t", "\t").Replace(@"\n", "\n").Replace(@"\r", "\r");
     }
 }

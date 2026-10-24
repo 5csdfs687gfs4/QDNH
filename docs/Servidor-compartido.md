@@ -39,4 +39,7 @@ Las colas de salida son acotadas. Audio descarta bloques antiguos. Serie/control
 
 Antes de uso diario, verificar físicamente ReleaseKey, límite máximo, pérdida de red con PTT, pérdida/reconexión AIOC y alternancia de dos móviles. Escribir al puerto no confirma el estado real del PTT. Los comandos de hardware que evitan KeyPress necesitan revisión específica.
 
-La autenticación individual y los roles quedan pendientes: el protocolo actual correlaciona canales mediante GUID y secreto compartido; no ofrece identidad individual autenticada ni TLS. No se han cambiado credenciales o acceso existente ni se presenta el indicativo declarado como prueba de identidad.
+La autenticacion individual y roles son opcionales (Acceso-individual.md). Sin configurar cuentas se conserva el acceso compartido anterior. TLS y la activacion de una red privada siguen pendientes de puesta en servicio; no se han cambiado credenciales ni acceso existente.
+
+
+Ampliacion posterior: ForwardTxAudio entrega al reproductor dentro de la misma autoridad de permisos, y Release limpia la cola de salida antes de otra concesion. Un error de limpieza bloquea TX con TX_OUTPUT_UNAVAILABLE hasta reinicializar. MultiListen recompone PCM16 antes del fan-out y las colas: descartar un bloque antiguo conserva muestras completas. La cancelacion efectiva de audio ya entregado al controlador necesita validacion fisica. Autenticacion individual y scripts de host estan descritos en Acceso-individual.md y Host-Windows-pruebas.md.

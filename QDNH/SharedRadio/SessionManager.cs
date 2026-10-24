@@ -1,3 +1,4 @@
+using QDNH.Security;
 using QDNH.Settings;
 using System;
 using System.Collections.Concurrent;
@@ -37,12 +38,15 @@ namespace QDNH.SharedRadio
         private bool monitorAnnounced;
         private TimeSpan TxLeaseTimeout => TimeSpan.FromSeconds(Vars.TxLeaseSeconds);
         private DateTime txStartedUtc;
+        private bool txOutputFault;
         private readonly Func<DateTime> utcNow;
         private readonly Action releasePtt;
         public Func<(bool Serial, bool Capture, bool Playback)> HardwareStatus { get; set; } = () => (false, false, false);
         public static readonly string[] Capabilities = { "health-v1", "operators-v1", "control-queue-v1", "tx-monitor-v1" };
         private readonly List<Guid> controlQueue = new();
         private readonly Dictionary<Guid, List<byte>> serialPending = new();
+        public bool AuthenticationRequired { get; private set; }
+        private string[] AdvertisedCapabilities => AuthenticationRequired ? Capabilities.Concat(new[] { "operator-auth-v1" }).ToArray() : Capabilities;
         private readonly Timer txWatchdog;
 
         // Throttle del aviso "audio TX descartado": un cliente SIN Fase B
@@ -68,6 +72,28 @@ namespace QDNH.SharedRadio
             txWatchdog = new Timer(_ => CheckTxLease(), null, 1000, 1000);
         }
 
+        public void ResetForReconfigure(bool authenticationRequired)
+        {
+            lock (sync)
+            {
+                ReleaseAnyTx("SERVER_RECONFIGURED"); ControlOwnerSessionId = null;
+                sessions.Clear(); controlQueue.Clear(); serialPending.Clear(); lastAudioRejectLogUtc.Clear();
+                AuthenticationRequired = authenticationRequired;
+                txOutputFault = false;
+            }
+        }
+        private SessionInfo BindSession(Guid id, OperatorPrincipal? principal, string callsign, bool monitor)
+        {
+            if (id == Guid.Empty || (AuthenticationRequired && principal == null)) throw new UnauthorizedAccessException("Sesión no autenticada.");
+            if (sessions.TryGetValue(id, out var existing))
+            {
+                if (existing.Principal?.UserId != principal?.UserId) throw new UnauthorizedAccessException("La sesión pertenece a otra identidad.");
+                return existing;
+            }
+            var session = new SessionInfo(id, principal?.Callsign ?? callsign, monitor) { Principal = principal };
+            sessions[id] = session; return session;
+        }
+
         // ------------------------------------------------------------
         // Alta / baja de sesiones
         // ------------------------------------------------------------
@@ -76,11 +102,12 @@ namespace QDNH.SharedRadio
         /// conexion nueva: crea la sesion si no existia (o la reutiliza
         /// si el audio/serie ya habian llegado antes) y contesta con el
         /// estado actual de control/TX.</summary>
-        public SessionInfo RegisterOrAttach(Guid sessionId, string callsign, bool supportsTxMonitor, Action<byte[]> sendControl, int protocolVersion = 1)
+        public SessionInfo RegisterOrAttach(Guid sessionId, string callsign, bool supportsTxMonitor, Action<byte[]> sendControl, int protocolVersion = 1, OperatorPrincipal? principal = null)
         {
             lock (sync)
             {
-                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, callsign, supportsTxMonitor));
+                SessionInfo session = BindSession(sessionId, principal, callsign, supportsTxMonitor);
+                callsign = principal?.Callsign ?? callsign;
                 session.Callsign = callsign;
                 session.SupportsTxMonitor = supportsTxMonitor;
                 session.SendControl = sendControl;
@@ -90,7 +117,7 @@ namespace QDNH.SharedRadio
                 string? controlCallsign = ControlOwnerSessionId != null && sessions.TryGetValue(ControlOwnerSessionId.Value, out var co) ? co.Callsign : null;
                 string? txCallsign = TxOwnerSessionId != null && sessions.TryGetValue(TxOwnerSessionId.Value, out var to) ? to.Callsign : null;
                 SendTo(session, ControlMsgType.HelloAck,
-                    new HelloAckMessage(ControlOwnerSessionId != null, controlCallsign, TxOwnerSessionId != null, txCallsign, 2, Vars.Version, Capabilities));
+                    new HelloAckMessage(ControlOwnerSessionId != null, controlCallsign, TxOwnerSessionId != null, txCallsign, 2, Vars.Version, AdvertisedCapabilities, principal?.UserId, principal?.Role.ToString()));
                 BroadcastOperators();
                 if (supportsTxMonitor && monitorAnnounced && TxOwnerSessionId != sessionId &&
                     TxOwnerSessionId is Guid ownerId && sessions.TryGetValue(ownerId, out var txOwner))
@@ -105,22 +132,22 @@ namespace QDNH.SharedRadio
         /// Si todavia no existe (el cliente abrio primero el audio que el
         /// control), se crea con un indicativo provisional que el Hello
         /// del canal de control completara enseguida.</summary>
-        public SessionInfo AttachAudio(Guid sessionId, Action<byte[], int> sendAudio)
+        public SessionInfo AttachAudio(Guid sessionId, Action<byte[], int> sendAudio, OperatorPrincipal? principal = null)
         {
             lock (sync)
             {
-                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
+                SessionInfo session = BindSession(sessionId, principal, "?", false);
                 session.SendAudio = sendAudio;
                 BroadcastOperators();
                 return session;
             }
         }
 
-        public SessionInfo AttachSerial(Guid sessionId, Action<byte[], int> sendSerial)
+        public SessionInfo AttachSerial(Guid sessionId, Action<byte[], int> sendSerial, OperatorPrincipal? principal = null)
         {
             lock (sync)
             {
-                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
+                SessionInfo session = BindSession(sessionId, principal, "?", false);
                 session.SendSerial = sendSerial;
                 BroadcastOperators();
                 return session;
@@ -165,13 +192,14 @@ namespace QDNH.SharedRadio
 
                 lastAudioRejectLogUtc.TryRemove(sessionId, out _);
                 controlQueue.Remove(sessionId); serialPending.Remove(sessionId);
-                if (sessions.TryRemove(sessionId, out var s))
-                    Vars.Out($"[SharedRadio] sesion desconectada: {s.Callsign} ({sessionId})");
+                current.SendControl = null;
+                Vars.Out($"[SharedRadio] sesion desconectada: {current.Callsign} ({sessionId})");
 
                 // A stale socket must not clear the replacement connection's
                 // control or TX ownership after a fast reconnect.
                 if (TxOwnerSessionId == sessionId) ReleaseTx(sessionId, "SESSION_LOST");
                 if (ControlOwnerSessionId == sessionId) ReleaseControlInternal("SESSION_LOST");
+                RemoveOrphan(sessionId);
                 BroadcastOperators();
             }
         }
@@ -186,6 +214,10 @@ namespace QDNH.SharedRadio
             {
                 if (!sessions.TryGetValue(sessionId, out var session)) return;
 
+                if (session.Principal?.Role == OperatorRole.Observer)
+                {
+                    SendTo(session, ControlMsgType.ControlDenied, new ControlDeniedMessage("ROLE_OBSERVER")); return;
+                }
                 if (ControlOwnerSessionId != null)
                 {
                     SendTo(session, ControlMsgType.ControlDenied, new ControlDeniedMessage("CONTROL_BUSY"));
@@ -245,6 +277,14 @@ namespace QDNH.SharedRadio
             {
                 if (!sessions.TryGetValue(sessionId, out var session)) return;
 
+                if (session.Principal?.Role == OperatorRole.Observer)
+                {
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("ROLE_OBSERVER")); return;
+                }
+                if (txOutputFault)
+                {
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("TX_OUTPUT_UNAVAILABLE")); return;
+                }
                 if (ControlOwnerSessionId != sessionId)
                 {
                     SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("NOT_IN_CONTROL"));
@@ -256,7 +296,7 @@ namespace QDNH.SharedRadio
                     return;
                 }
 
-                if (TxOwnerSessionId == sessionId) return; // No reiniciar el l�mite m�ximo con peticiones repetidas.
+                if (TxOwnerSessionId == sessionId) return; // No reiniciar el límite máximo con peticiones repetidas.
                 session.LastFrequencyMHz = frequencyMHz;
                 session.LastModulation = modulation;
                 TxOwnerSessionId = sessionId;
@@ -274,10 +314,10 @@ namespace QDNH.SharedRadio
             lock (sync)
             {
                 if (TxOwnerSessionId != sessionId) return;
-                // Reservar la transici�n antes del callback: si falla USB puede volver a pedir el cierre.
+                // Reservar la transición antes del callback: si falla USB puede volver a pedir el cierre.
                 // El cerrojo impide conceder otro TX hasta terminar la escritura de PTT OFF.
                 TxOwnerSessionId = null;
-                try { releasePtt(); } catch (Exception ex) { Vars.Err($"No se pudo liberar PTT: {ex.Message}"); }
+                try { releasePtt(); } catch (Exception ex) { txOutputFault = true; Vars.Err($"No se pudo liberar PTT: {ex.Message}"); }
                 monitorAnnounced = false;
                 txLeaseExpiresUtc = DateTime.MaxValue;
                 Vars.Out($"[SharedRadio] TX_MONITOR_STOPPED reason={reason}");
@@ -314,6 +354,16 @@ namespace QDNH.SharedRadio
         /// <returns>true si el bloque viene de quien tiene el TX legitimo
         /// y debe seguir su camino critico hacia el AIOC; false si hay
         /// que descartarlo (no es el TxOwner).</returns>
+        public bool ForwardTxAudio(Guid sessionId, byte[] data, int length, Action<byte[], int> sink, Action<byte[], int>? source = null)
+        {
+            lock (sync)
+            {
+                if (!OnTxAudio(sessionId, data, length, source)) return false;
+                sink(data, length);
+                return true;
+            }
+        }
+
         public bool OnTxAudio(Guid sessionId, byte[] data, int length, Action<byte[], int>? source = null)
         {
             lock (sync)
@@ -391,12 +441,12 @@ namespace QDNH.SharedRadio
             }
         }
 
-        // Solo se env�an extensiones a clientes que anuncian protocolo 2.
+        // Solo se envían extensiones a clientes que anuncian protocolo 2.
         public OperatorsStateMessage GetOperators()
         {
             lock (sync) return new(sessions.Values.Where(s => s.SendControl != null).Select(s => new OperatorInfo(s.Id, s.Callsign,
                 s.SendAudio != null, s.SendSerial != null, ControlOwnerSessionId == s.Id, TxOwnerSessionId == s.Id,
-                controlQueue.IndexOf(s.Id) + 1)).OrderBy(s => s.Callsign).ToArray());
+                controlQueue.IndexOf(s.Id) + 1, s.Principal?.Role.ToString() ?? "Operator")).OrderBy(s => s.Callsign).ToArray());
         }
         private void BroadcastOperators() => Broadcast(ControlMsgType.OperatorsState, GetOperators(), s => s.SupportsExtensions);
         public void SendOperators(Guid id) { lock (sync) if (sessions.TryGetValue(id, out var s) && s.SupportsExtensions) SendTo(s, ControlMsgType.OperatorsState, GetOperators()); }
@@ -406,7 +456,7 @@ namespace QDNH.SharedRadio
             {
                 if (!sessions.TryGetValue(id, out var s) || s.SendControl == null) return;
                 controlQueue.Remove(id);
-                if (join && ControlOwnerSessionId != id) controlQueue.Add(id);
+                if (join && ControlOwnerSessionId != id && s.Principal?.Role != OperatorRole.Observer) controlQueue.Add(id);
                 BroadcastOperators();
             }
         }
@@ -417,10 +467,10 @@ namespace QDNH.SharedRadio
                 if (!sessions.TryGetValue(id, out var s) || !s.SupportsExtensions) return;
                 var h = HardwareStatus();
                 SendTo(s, ControlMsgType.HealthState, new HealthStateMessage(Vars.Version, 2, h.Serial, h.Capture, h.Playback,
-                    sessions.Values.Count(x => x.SendControl != null), Vars.TxLeaseSeconds, Vars.MaxTxSeconds, Capabilities));
+                    sessions.Values.Count(x => x.SendControl != null), Vars.TxLeaseSeconds, Vars.MaxTxSeconds, AdvertisedCapabilities));
             }
         }
-        // Los l�mites de TCP no son l�mites de paquetes CAT. Reensamblar antes de autorizar PTT.
+        // Los límites de TCP no son límites de paquetes CAT. Reensamblar antes de autorizar PTT.
         public void ForwardSerial(Guid id, byte[] data, int length, Action<byte[], int, int> send, Action<byte[], int>? source = null)
         {
             lock (sync)

@@ -36,7 +36,7 @@ public class ServerSafetyTests
             case "lease": now = now.AddSeconds(121); manager.CheckTxLease(); break;
             case "maximum":
                 for (int i = 0; i < 1801; i++) { now = now.AddSeconds(1); manager.OnTxAudio(id, new byte[2], 2); }
-                manager.TryRequestTx(id, 145.5, "FM"); // Repetir RequestTx no reinicia el l�mite.
+                manager.TryRequestTx(id, 145.5, "FM"); // Repetir RequestTx no reinicia el límite.
                 manager.CheckTxLease(); break;
         }
         Assert.Null(manager.TxOwnerSessionId);
@@ -56,6 +56,40 @@ public class ServerSafetyTests
             manager.ReleaseTx(id, "PTT_OFF");
             Assert.Equal(1, releases); Assert.Null(manager.TxOwnerSessionId);
         }
+    }
+    [Fact]
+    public async System.Threading.Tasks.Task ReleaseWaitsForAcceptedAudioAndOldOwnerCannotWriteAfterward()
+    {
+        using var entered = new System.Threading.ManualResetEventSlim();
+        using var resume = new System.Threading.ManualResetEventSlim();
+        var order = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        using var manager = new SessionManager(() => order.Enqueue("release-and-clear"));
+        Guid old = Guid.NewGuid(), next = Guid.NewGuid();
+        manager.RegisterOrAttach(old, "OLD", true, _ => { }); manager.RegisterOrAttach(next, "NEXT", true, _ => { });
+        manager.TryRequestControl(old); manager.TryRequestTx(old, 145.5, "FM");
+        var forwarding = System.Threading.Tasks.Task.Run(() => manager.ForwardTxAudio(old, new byte[2], 2, (_, _) =>
+        { entered.Set(); resume.Wait(); order.Enqueue("old-audio"); }));
+        Assert.True(entered.Wait(2000));
+        var releasing = System.Threading.Tasks.Task.Run(() => manager.ReleaseControl(old));
+        await System.Threading.Tasks.Task.Delay(100);
+        Assert.False(releasing.IsCompleted); // La cesión no puede adelantarse al sink admitido.
+        resume.Set(); await forwarding; await releasing;
+        manager.TryRequestControl(next); manager.TryRequestTx(next, 145.5, "FM");
+        Assert.False(manager.ForwardTxAudio(old, new byte[2], 2, (_, _) => order.Enqueue("stale-audio")));
+        Assert.True(manager.ForwardTxAudio(next, new byte[2], 2, (_, _) => order.Enqueue("new-audio")));
+        Assert.Equal(new[] { "old-audio", "release-and-clear", "new-audio" }, order.ToArray());
+    }
+    [Fact]
+    public void ReleaseOutputFailureBlocksNewTxUntilReconfiguration()
+    {
+        using var manager = new SessionManager(() => throw new System.IO.IOException("Fallo de salida simulado"));
+        Guid id = Guid.NewGuid(); manager.RegisterOrAttach(id, "TEST", true, _ => { });
+        manager.TryRequestControl(id); manager.TryRequestTx(id, 145.5, "FM");
+        manager.ReleaseTx(id, "PTT_OFF"); manager.TryRequestTx(id, 145.5, "FM");
+        Assert.Null(manager.TxOwnerSessionId);
+        manager.ResetForReconfigure(false); manager.RegisterOrAttach(id, "TEST", true, _ => { });
+        manager.TryRequestControl(id); manager.TryRequestTx(id, 145.5, "FM");
+        Assert.Equal(id, manager.TxOwnerSessionId);
     }
     [Fact]
     public void FragmentedPttNeedsTxPermissionAndControlCannotBeStolen()

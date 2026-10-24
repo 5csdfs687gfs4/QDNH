@@ -1,3 +1,5 @@
+using QDNH.Audio;
+using QDNH.Security;
 using QDNH.Settings;
 using System;
 using System.Net;
@@ -7,7 +9,6 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Threading;
-
 namespace QDNH.Network
 {
     /// <summary>
@@ -32,21 +33,22 @@ namespace QDNH.Network
     public class MultiListen
     {
         private readonly TcpListener listener;
+        private readonly OperatorAuthentication? authentication;
         private readonly Action<Guid, Action<byte[], int>, byte[], int> callback;
-        private readonly Func<Guid, Action<byte[], int>, object> onConnected;
+        private readonly Func<Guid, Action<byte[], int>, OperatorPrincipal?, object> onConnected;
         private readonly Action<Guid, Action<byte[], int>> onDisconnected;
         private volatile bool closed = false;
         private readonly ConcurrentDictionary<TcpClient, byte> clients = new();
         private readonly bool dropOldest;
         private readonly Task loop;
-
         public MultiListen(
             int port,
             Action<Guid, Action<byte[], int>, byte[], int> callback,
-            Func<Guid, Action<byte[], int>, object> onConnected,
-            Action<Guid, Action<byte[], int>> onDisconnected, bool dropOldest = true)
+            Func<Guid, Action<byte[], int>, OperatorPrincipal?, object> onConnected,
+            Action<Guid, Action<byte[], int>> onDisconnected, bool dropOldest = true, OperatorAuthentication? authentication = null)
         {
             this.callback = callback;
+            this.authentication = authentication;
             this.dropOldest = dropOldest;
             this.onConnected = onConnected;
             this.onDisconnected = onDisconnected;
@@ -54,7 +56,6 @@ namespace QDNH.Network
             listener.Start();
             loop = Loop();
         }
-
         public void Close()
         {
             using (loop)
@@ -65,7 +66,6 @@ namespace QDNH.Network
                 loop.Wait();
             }
         }
-
         private async Task Loop()
         {
             while (!closed)
@@ -78,7 +78,6 @@ namespace QDNH.Network
                 _ = Task.Run(async () => { try { await HandleClient(client); } finally { clients.TryRemove(client, out _); } });
             }
         }
-
         private async Task HandleClient(TcpClient client)
         {
             using (client)
@@ -91,7 +90,6 @@ namespace QDNH.Network
                 try { client.NoDelay = true; } catch { }
                 client.ReceiveTimeout = 10000;
                 NetworkStream stream = client.GetStream();
-
                 Authenticator auth = new(Vars.Password);
                 try { await stream.WriteAsync(auth.Salt); await stream.FlushAsync(); } catch { return; }
                 byte[] chal = new byte[auth.Hash.Length];
@@ -107,8 +105,8 @@ namespace QDNH.Network
                     }
                 }
                 catch { return; }
-                if (!auth.Challenge(chal)) return;
-
+                OperatorPrincipal? principal = authentication?.Authenticate(chal, auth.Salt);
+                if (authentication != null ? principal == null : !auth.Challenge(chal)) return;
                 byte[] idBytes = new byte[16];
                 int got = 0;
                 while (got < 16)
@@ -120,7 +118,6 @@ namespace QDNH.Network
                     got += n;
                 }
                 Guid sessionId = new(idBytes);
-
                 // Herramienta de diagnostico (ago-2026, desconexiones
                 // intermitentes de Shared Radio Mode sobre WAN): duracion
                 // de esta conexion y bytes recibidos, para poder loguear
@@ -131,7 +128,6 @@ namespace QDNH.Network
                 // otro lado.
                 DateTime connectedAtUtc = DateTime.UtcNow;
                 long bytesInThisConn = 0;
-
                 // Cola acotada propia de este cliente para lo que le
                 // enviemos (RX real, telemetria serie o copia de TX
                 // Monitor, segun el puerto). Descarta lo mas antiguo si
@@ -143,7 +139,6 @@ namespace QDNH.Network
                         FullMode = dropOldest ? BoundedChannelFullMode.DropOldest : BoundedChannelFullMode.Wait,
                         SingleReader = true,
                     });
-
                 void Send(byte[] data, int length)
                 {
                     byte[] copy = new byte[length];
@@ -151,9 +146,7 @@ namespace QDNH.Network
                     if (!queue.Writer.TryWrite((copy, length)))
                         client.Dispose(); // Nunca perder bytes serie silenciosamente: cerrar el cliente lento.
                 }
-
-                onConnected(sessionId, Send);
-
+                try { onConnected(sessionId, Send, principal); } catch (UnauthorizedAccessException) { return; }
                 Task sender = Task.Run(async () =>
                 {
                     await foreach (var item in queue.Reader.ReadAllAsync())
@@ -162,7 +155,7 @@ namespace QDNH.Network
                         catch { client.Dispose(); break; }
                     }
                 });
-
+                var pcm = new Pcm16BlockAssembler();
                 Exception? lastException = null;
                 try
                 {
@@ -174,7 +167,13 @@ namespace QDNH.Network
                         catch (Exception ex) { lastException = ex; br = -1; }
                         if (br <= 0) break;
                         bytesInThisConn += br;
-                        callback(sessionId, Send, b, br);
+                        if (dropOldest)
+                        {
+                            // El puerto de audio solo encola muestras completas: DropOldest conserva paridad.
+                            byte[] complete = pcm.Push(b, br);
+                            if (complete.Length > 0) callback(sessionId, Send, complete, complete.Length);
+                        }
+                        else callback(sessionId, Send, b, br);
                     }
                 }
                 finally
@@ -195,7 +194,6 @@ namespace QDNH.Network
                 }
             }
         }
-
         // Herramienta de diagnostico: recorre ex.InnerException (hasta 4
         // niveles) para sacar a la luz el SocketException real cuando lo
         // hay -- el mensaje externo (p.ej. de un IOException) casi nunca

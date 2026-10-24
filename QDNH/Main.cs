@@ -1,3 +1,4 @@
+using QDNH.Security;
 using Alsa.Net;
 using NAudio.CoreAudioApi;
 using QDNH.Audio;
@@ -44,12 +45,14 @@ namespace QDNH
         {
             var frame = RadioProtocol.ReleasePtt();
             serialPort?.Send(frame, 0, frame.Length);
+            playback?.ClearPending();
         }
         private static UART? serialPort = null;
         private static ICapture? capture = null;
         private static IPlayback? playback = null;
         private static bool commandLine = true;
         private static AudioPlatform audioPlatform = AudioPlatform.None;
+        private static readonly object initGate = new();
         private static readonly System.Timers.Timer restartTimer = new(86400000);
 
         private static void Out(string s, string suffix = "\n") => Vars.Out(s, suffix);
@@ -475,7 +478,20 @@ namespace QDNH
 
         private static void Init()
         {
+            lock (initGate) InitLocked();
+        }
+
+        private static void InitLocked()
+        {
             sessions.ReleaseAnyTx("SERVER_RECONFIGURED");
+            controlChannel?.Close(); controlChannel = null;
+            multiAudioServer?.Close(); multiAudioServer = null;
+            multiSerialServer?.Close(); multiSerialServer = null;
+            audioServer?.Close(); audioServer = null; serialServer?.Close(); serialServer = null;
+            var operatorAuthentication = OperatorAuthentication.Load(Vars.OperatorAccountsFile);
+            if (operatorAuthentication != null && !Vars.SharedRadioMode)
+                throw new InvalidOperationException("Las cuentas individuales requieren SharedRadioMode=True; no se abrirán listeners sin seguridad.");
+            sessions.ResetForReconfigure(operatorAuthentication != null);
             restartTimer.Interval++;
             restartTimer.Interval--;
             commandLine = false;
@@ -496,7 +512,7 @@ namespace QDNH
                 }
                 if (Vars.SharedRadioMode)
                 {
-                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected, false); } catch { }
+                    try { multiSerialServer = new(Vars.NetworkPort + 1, MultiNetworkSerialCallback, MultiSerialConnected, MultiSerialDisconnected, false, operatorAuthentication); } catch { }
                 }
                 else
                 {
@@ -515,7 +531,7 @@ namespace QDNH
                 if (audioPlatform == AudioPlatform.ALSA) ALSA.Configure();
                 if (Vars.SharedRadioMode)
                 {
-                    try { multiAudioServer = new(Vars.NetworkPort, MultiNetworkAudioCallback, MultiAudioConnected, MultiAudioDisconnected); } catch { }
+                    try { multiAudioServer = new(Vars.NetworkPort, MultiNetworkAudioCallback, MultiAudioConnected, MultiAudioDisconnected, true, operatorAuthentication); } catch { }
                 }
                 else
                 {
@@ -555,7 +571,7 @@ namespace QDNH
             if (Vars.SharedRadioMode)
             {
                 sessions.HardwareStatus = () => (serialPort?.IsConnected == true, capture != null, playback != null);
-                try { controlChannel = new(Vars.NetworkPort + 2, sessions); } catch { }
+                try { controlChannel = new(Vars.NetworkPort + 2, sessions, operatorAuthentication); } catch { }
             }
         }
 
@@ -609,8 +625,7 @@ namespace QDNH
             // demas oyentes). Si no lo es, el bloque se descarta aqui
             // mismo y jamas llega al AIOC -- la radio no puede mezclar
             // TX de dos operadores a la vez.
-            if (sessions.OnTxAudio(sessionId, data, length, source))
-                playback?.Send(data, length);
+            sessions.ForwardTxAudio(sessionId, data, length, (pcm, count) => playback?.Send(pcm, count), source);
         }
 
         private static void MultiNetworkSerialCallback(Guid sessionId, Action<byte[], int> source, byte[] data, int length)
@@ -622,14 +637,14 @@ namespace QDNH
             sessions.ForwardSerial(sessionId, data, length, (frame, offset, count) => serialPort?.Send(frame, offset, count), source);
         }
 
-        private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send) =>
-            sessions.AttachAudio(sessionId, send);
+        private static object MultiAudioConnected(Guid sessionId, Action<byte[], int> send, OperatorPrincipal? principal) =>
+            sessions.AttachAudio(sessionId, send, principal);
 
         private static void MultiAudioDisconnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.OnAudioChannelClosed(sessionId, send);
 
-        private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send) =>
-            sessions.AttachSerial(sessionId, send);
+        private static object MultiSerialConnected(Guid sessionId, Action<byte[], int> send, OperatorPrincipal? principal) =>
+            sessions.AttachSerial(sessionId, send, principal);
 
         private static void MultiSerialDisconnected(Guid sessionId, Action<byte[], int> send) =>
             sessions.OnSerialChannelClosed(sessionId, send);

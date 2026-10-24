@@ -46,7 +46,7 @@ public class ControlTransportTests
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(new HelloMessage(id, "TCPTEST", true, 2));
             byte[] hello = new byte[5 + json.Length]; hello[0] = 1;
             BitConverter.GetBytes(json.Length).CopyTo(hello, 1); json.CopyTo(hello, 5);
-            // La fragmentación deliberada también debe conservar el framing.
+            // La fragmentaciÃ³n deliberada tambiÃ©n debe conservar el framing.
             foreach (byte b in hello) await stream.WriteAsync(new byte[] { b });
             for (int i = 0; i < 2; i++)
             {
@@ -82,9 +82,38 @@ public class ControlTransportTests
                 if (header[0] == 2) { gotAck = true; break; }
             }
             Assert.True(gotAck); Assert.True(manager.IsControlOwner(id)); Assert.Equal(id, manager.TxOwnerSessionId);
-
             server.Close();
             Assert.True(SpinWait.SpinUntil(() => releases == 1, 3000));
+        }
+        finally { server.Close(); }
+    }
+    [Fact]
+    public async Task IndividualSecretAuthenticatesOnWireAndHelloCannotChangeIdentity()
+    {
+        const string secret = "only-test-fixture-secret-123";
+        string config = "{\"SchemaVersion\":1,\"Operators\":[{\"UserId\":\"fixture\",\"Callsign\":\"AUTENTICADO\",\"Role\":\"Observer\",\"SecretEnvironmentVariable\":\"QDNH_TEST_SECRET\"}]}";
+        var policy = QDNH.Security.OperatorAuthentication.Parse(config, _ => secret);
+        using var manager = new SessionManager(); manager.ResetForReconfigure(true);
+        var server = new ControlChannel(0, manager, policy);
+        try
+        {
+            using var client = new TcpClient(); await client.ConnectAsync(IPAddress.Loopback, server.BoundPort);
+            var stream = client.GetStream(); byte[] salt = await ReadExact(stream, 32);
+            byte[] input = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Concat(Encoding.ASCII.GetBytes(secret), salt));
+            await stream.WriteAsync(SHA256.HashData(input));
+            byte[] json = JsonSerializer.SerializeToUtf8Bytes(new HelloMessage(Guid.NewGuid(), "SUPLANTADO", true, 2));
+            byte[] hello = new byte[json.Length + 5]; hello[0] = 1; BitConverter.GetBytes(json.Length).CopyTo(hello, 1); json.CopyTo(hello, 5);
+            await stream.WriteAsync(hello);
+            byte[] header = await ReadExact(stream, 5); Assert.Equal(2, header[0]);
+            var ack = JsonSerializer.Deserialize<HelloAckMessage>(await ReadExact(stream, BitConverter.ToInt32(header, 1)));
+            Assert.Equal("fixture", ack!.AuthenticatedUserId); Assert.Equal("Observer", ack.Role);
+            Assert.Equal("AUTENTICADO", manager.GetOperators().Operators[0].Callsign);
+            using var wrong = new TcpClient(); await wrong.ConnectAsync(IPAddress.Loopback, server.BoundPort);
+            var wrongStream = wrong.GetStream(); salt = await ReadExact(wrongStream, 32);
+            input = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Concat(Encoding.ASCII.GetBytes("old-shared-password"), salt));
+            await wrongStream.WriteAsync(SHA256.HashData(input));
+            using var timeout = new CancellationTokenSource(3000);
+            Assert.Equal(0, await wrongStream.ReadAsync(new byte[1], timeout.Token));
         }
         finally { server.Close(); }
     }

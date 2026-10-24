@@ -20,5 +20,6 @@ public static class RadioProtocol
     }
     public static bool IsPttOn(byte[] frame) => frame.Length >= 14 &&
         (frame[4] ^ xor[0]) == 1 && (frame[5] ^ xor[1]) == 8 &&
-        (frame[8] ^ xor[4]) == 16 && (frame[9] ^ xor[5]) == 0;
+        // Firmware CMD_0801 aplica Key & 0x1f; bit 5 es click y el byte alto es padding.
+        ((frame[8] ^ xor[4]) & 0x1f) == 16;
 }

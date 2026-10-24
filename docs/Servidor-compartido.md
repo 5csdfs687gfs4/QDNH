@@ -43,3 +43,6 @@ La autenticacion individual y roles son opcionales (Acceso-individual.md). Sin c
 
 
 Ampliacion posterior: ForwardTxAudio entrega al reproductor dentro de la misma autoridad de permisos, y Release limpia la cola de salida antes de otra concesion. Un error de limpieza bloquea TX con TX_OUTPUT_UNAVAILABLE hasta reinicializar. MultiListen recompone PCM16 antes del fan-out y las colas: descartar un bloque antiguo conserva muestras completas. La cancelacion efectiva de audio ya entregado al controlador necesita validacion fisica. Autenticacion individual y scripts de host estan descritos en Acceso-individual.md y Host-Windows-pruebas.md.
+
+
+Correccion de compatibilidad de firmware: CMD_0801 de nicsure/quansheng-dock-fw revision431deaafac62fb2e9ff9800c87575070480fcb18 (app/uart.c744) interpreta Key &0x1f y trata el segundo byte como padding. El filtro PTT usa esa misma mascara:16,48,80 y variantes con padding siguen requiriendo permiso TX. Pruebas con paquetes CAT cifrados completos y fragmentados verifican denegacion antes/despues del permiso y aceptacion durante la concesion. No se ha emitido RF para estas pruebas.

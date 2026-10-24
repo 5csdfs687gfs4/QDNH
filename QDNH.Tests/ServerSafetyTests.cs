@@ -91,8 +91,13 @@ public class ServerSafetyTests
         manager.TryRequestControl(id); manager.TryRequestTx(id, 145.5, "FM");
         Assert.Equal(id, manager.TxOwnerSessionId);
     }
-    [Fact]
-    public void FragmentedPttNeedsTxPermissionAndControlCannotBeStolen()
+    [Theory]
+    [InlineData(16)]
+    [InlineData(48)]
+    [InlineData(80)]
+    [InlineData(240)]
+    [InlineData(272)]
+    public void FragmentedPttNeedsTxPermissionAndControlCannotBeStolen(int key)
     {
         using var manager = new SessionManager();
         Guid owner = Guid.NewGuid(), listener = Guid.NewGuid();
@@ -102,7 +107,7 @@ public class ServerSafetyTests
         Assert.True(manager.IsControlOwner(owner));
         var forwarded = new List<byte[]>();
         Action<byte[], int, int> send = (data, _, _) => forwarded.Add(data);
-        byte[] ptt = RadioProtocol.Key(16);
+        byte[] ptt = RadioProtocol.Key((ushort)key);
         manager.ForwardSerial(owner, ptt[..5], 5, send);
         manager.ForwardSerial(owner, ptt[5..], ptt.Length - 5, send);
         Assert.Empty(forwarded);

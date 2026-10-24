@@ -5,7 +5,13 @@ namespace QDNH.Hosting;
 
 public sealed record LocalHealthSnapshot(string State, bool SerialExpected, bool SerialConnected,
     bool CaptureExpected, bool CaptureInitialized, bool PlaybackExpected, bool PlaybackInitialized,
-    int Operators, bool TxActive, bool CaptureRecent = false, bool SerialReadResponsive = false);
+    int Operators, bool TxActive, bool CaptureRecent = false, bool SerialReadResponsive = false,
+    bool AudioListenerReady = false, bool SerialListenerReady = false, bool ControlListenerReady = false);
+public sealed record ListenerReadiness(bool AudioExpected, bool AudioListening, bool SerialExpected,
+    bool SerialListening, bool ControlExpected, bool ControlListening)
+{
+    public bool AllReady => (!AudioExpected || AudioListening) && (!SerialExpected || SerialListening) && (!ControlExpected || ControlListening);
+}
 public sealed record HostHeartbeat(int Protocol, int ProcessId, long ProcessStartTimeUtcTicks, long Sequence,
     DateTime UtcTimestamp, string State, LocalHealthSnapshot Health);
 
@@ -25,7 +31,9 @@ public sealed class ServerHeartbeat : IDisposable
             while (!stop.IsCancellationRequested)
             {
                 // Si la autoridad de control queda bloqueada, tampoco avanza este heartbeat.
-                var health = probe();
+                LocalHealthSnapshot health;
+                try { health = probe(); }
+                catch { health = new("Degraded", false, false, false, false, false, false, 0, false); }
                 var heartbeat = new HostHeartbeat(1, pid, started, ++sequence, DateTime.UtcNow, health.State, health);
                 try { Publish(path, heartbeat); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

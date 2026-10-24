@@ -27,6 +27,15 @@ namespace QDNH.Network
     public class ControlChannel
     {
         private readonly TcpListener listener;
+        public bool IsListening
+        {
+            get
+            {
+                try { return !closed && listener.Server.IsBound && loop != null && !loop.IsCompleted; }
+                catch (ObjectDisposedException) { return false; }
+                catch (SocketException) { return false; }
+            }
+        }
         private readonly OperatorAuthentication? authentication;
         private readonly SessionManager sessions;
         private volatile bool closed = false;

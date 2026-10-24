@@ -598,17 +598,21 @@ namespace QDNH
             bool captureExpected = Vars.Audio && !Vars.AudioInput.Equals(Lang.Disabled);
             bool playbackExpected = Vars.Audio && !Vars.AudioOutput.Equals(Lang.Disabled);
             bool serialConnected = serialPort?.IsConnected == true;
+            bool audioListening = Vars.SharedRadioMode ? multiAudioServer?.IsListening == true : audioServer?.IsListening == true;
+            bool serialListening = Vars.SharedRadioMode ? multiSerialServer?.IsListening == true : serialServer?.IsListening == true;
+            bool controlListening = controlChannel?.IsListening == true;
+            var listeners = new QDNH.Hosting.ListenerReadiness(Vars.Audio, audioListening, Vars.Serial, serialListening, Vars.SharedRadioMode, controlListening);
             bool serialResponsive = serialPort?.ReadResponsive == true;
             long now = Stopwatch.GetTimestamp();
             long lastCapture = System.Threading.Interlocked.Read(ref lastCaptureTick);
             bool captureRecent = lastCapture > 0 && (now - lastCapture) / (double)Stopwatch.Frequency < 15;
             bool captureGrace = (now - System.Threading.Interlocked.Read(ref initializedAtTick)) / (double)Stopwatch.Frequency < 15;
-            bool healthy = (!serialExpected || (serialConnected && serialResponsive)) &&
+            bool healthy = listeners.AllReady && (!serialExpected || (serialConnected && serialResponsive)) &&
                 (!captureExpected || (capture != null && (captureGrace || captureRecent))) &&
                 (!playbackExpected || (playback != null && playback.IsResponsive));
             return new(initializationComplete ? (healthy ? "Running" : "Degraded") : "Initializing",
                 serialExpected, serialConnected, captureExpected, capture != null, playbackExpected, playback != null,
-                state.Operators, state.TxActive, captureRecent, serialResponsive);
+                state.Operators, state.TxActive, captureRecent, serialResponsive, audioListening, serialListening, controlListening);
         }
 
         private static void CaptureCallback(byte[] data, int length)

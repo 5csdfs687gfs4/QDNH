@@ -33,6 +33,15 @@ namespace QDNH.Network
     public class MultiListen
     {
         private readonly TcpListener listener;
+        public bool IsListening
+        {
+            get
+            {
+                try { return !closed && listener.Server.IsBound && loop != null && !loop.IsCompleted; }
+                catch (ObjectDisposedException) { return false; }
+                catch (SocketException) { return false; }
+            }
+        }
         private readonly OperatorAuthentication? authentication;
         private readonly Action<Guid, Action<byte[], int>, byte[], int> callback;
         private readonly Func<Guid, Action<byte[], int>, OperatorPrincipal?, object> onConnected;

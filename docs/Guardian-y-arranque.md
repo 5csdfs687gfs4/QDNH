@@ -54,3 +54,6 @@ La elección Logon/StartupAudioExperimental y el encendido al volver corriente q
 La prueba HostHeartbeatTests bloquea deliberadamente el probe de autoridad y comprueba que deja de publicar secuencias aunque el worker exista. Test-HostScripts.ps1 con SupervisorFixture usa un ejecutable sin radio/audio: primera instancia sigue viva pero congela el heartbeat e ignora parada; se detecta, termina y aparece una segunda instancia con sonda creciente. Luego se solicita salida limpia y se comprueba que no quedan procesos. No registra tareas ni modifica firmware.
 
 Los paquetes anteriores a este heartbeat no pueden usarse con la vigilancia de salud nueva: restaurarlos requiere un supervisor compatible o lanzamiento manual de la versión anterior. No presentar ausencia de sonda como salud correcta.
+
+
+La salud incluye los listeners TCP esperados por el modo configurado (audio, serie y control compartido). Un error al ocupar el puerto o un listener cerrado produce Degraded, aunque los dispositivos esten abiertos y el proceso exista. Una prueba ocupa realmente un puerto y verifica que esa apertura fallida no se considera lista; tambien verifica perdida de disponibilidad al cerrar el listener. No se han cambiado direcciones bind ni se han abierto puertos adicionales en el NucBox.

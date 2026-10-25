@@ -1,4 +1,5 @@
 using QDNH.Serial;
+using System.Buffers.Binary;
 
 namespace QDNH.SharedRadio;
 
@@ -15,8 +16,10 @@ public sealed class ScreenSnapshotBroker : IDisposable
     private DateTime requestedAt, capturedAt;
     private byte[]? cached;
     private readonly byte[] bitmap = new byte[1024];
+    private readonly byte[] vectorProbe = new byte[8];
     private int bitmapCount = -1, remaining, state, uiType, binaryLength, binaryIdLow;
-    private bool disposed, readIssued;
+    private int vectorProbeCount, vectorPaddingLength;
+    private bool disposed, readIssued, discardRemaining;
     public ScreenSnapshotBroker(Func<DateTime>? clock = null, bool startTimer = true)
     {
         now = clock ?? (() => DateTime.UtcNow);
@@ -64,7 +67,7 @@ public sealed class ScreenSnapshotBroker : IDisposable
         lock (gate)
         {
             failed = pending.Values.ToList(); pending.Clear(); lastRequests.Clear(); cached = null;
-            bitmapCount = -1; state = remaining = 0; readIssued = false;
+            bitmapCount = -1; state = remaining = vectorProbeCount = 0; readIssued = discardRemaining = false;
         }
         foreach (var item in failed) SafeReply(item.Reply, Failure(item.Id, "serial-unavailable"));
     }
@@ -92,9 +95,8 @@ public sealed class ScreenSnapshotBroker : IDisposable
         byte[]? ready = null; DateTime stamp = default; bool scan = false;
         lock (gate)
         {
-            for (int i = 0; i < length; i++)
+            void Accept(byte b)
             {
-                byte b = data[i];
                 if (bitmapCount >= 0)
                 {
                     bitmap[bitmapCount++] = b;
@@ -103,9 +105,38 @@ public sealed class ScreenSnapshotBroker : IDisposable
                         ready = bitmap.ToArray(); cached = ready; capturedAt = stamp = now(); bitmapCount = -1;
                         completed.AddRange(pending.Values); pending.Clear(); readIssued = false;
                     }
-                    continue;
+                    return;
                 }
-                if (remaining > 0) { output.Add(b); remaining--; continue; }
+                if (remaining > 0)
+                {
+                    if (!discardRemaining) output.Add(b);
+                    if (--remaining == 0) discardRemaining = false;
+                    return;
+                }
+                if (state == 11)
+                {
+                    // Some Dock firmware sends Length bytes from address zero
+                    // after type 6 although Length encodes battery voltage.
+                    // Detect its ARM vector-table signature; never compensate
+                    // with a guessed LCD column offset. Fixed firmware may send
+                    // the next normal B5/AB/EF marker immediately instead.
+                    vectorProbe[vectorProbeCount++] = b;
+                    bool reject = vectorProbeCount == 1 && (b & 3) != 0;
+                    if (vectorProbeCount == 4 && !IsRamStack(vectorProbe)) reject = true;
+                    if (!reject && vectorProbeCount < 8) return;
+                    if (!reject && IsArmVectorPrefix(vectorProbe))
+                    {
+                        remaining = vectorPaddingLength - vectorProbeCount;
+                        discardRemaining = remaining > 0; vectorProbeCount = 0; state = 0;
+                    }
+                    else
+                    {
+                        byte[] replay = vectorProbe.AsSpan(0, vectorProbeCount).ToArray();
+                        vectorProbeCount = 0; state = 0;
+                        foreach (byte value in replay) Accept(value);
+                    }
+                    return;
+                }
                 // Header tracking prevents EF in binary/UI payloads being confused with a dump marker.
                 if (state != 0)
                 {
@@ -116,7 +147,11 @@ public sealed class ScreenSnapshotBroker : IDisposable
                         case 2: state = 3; break;
                         case 3: state = 4; break;
                         case 4: state = 5; break;
-                        case 5: remaining = uiType == 6 ? 0 : b; state = 0; break;
+                        case 5:
+                            if (uiType == 6 && b >= vectorProbe.Length)
+                            { vectorPaddingLength = b; vectorProbeCount = 0; state = 11; }
+                            else { remaining = uiType == 6 ? 0 : b; state = 0; }
+                            break;
                         case 6: state = b == 0xcd ? 7 : 0; break;
                         case 7: binaryLength = b; state = 8; break;
                         case 8:
@@ -129,18 +164,29 @@ public sealed class ScreenSnapshotBroker : IDisposable
                             if ((binaryIdLow | ((b ^ 0x6c) << 8)) == 0x0908) scan = true;
                             remaining = binaryLength - 2 + 4; state = 0; break;
                     }
-                    continue;
+                    return;
                 }
                 if (b == 0xef && readIssued)
-                { bitmapCount = 0; continue; }
+                { bitmapCount = 0; return; }
                 output.Add(b);
                 if (b == 0xb5) state = 1;
                 else if (b == 0xab) state = 6;
             }
+            for (int i = 0; i < length; i++) Accept(data[i]);
         }
         if (output.Count > 0) InvalidateCache(); // A live UI/telemetry update must not replay an earlier framebuffer.
         if (ready != null) foreach (var item in completed) SafeReply(item.Reply, Success(item.Id, ready, stamp));
         return (output.ToArray(), scan);
+    }
+    private static bool IsRamStack(byte[] prefix)
+    {
+        uint stack = BinaryPrimitives.ReadUInt32LittleEndian(prefix);
+        return stack > 0x20000000 && stack <= 0x20004000 && (stack & 3) == 0;
+    }
+    private static bool IsArmVectorPrefix(byte[] prefix)
+    {
+        uint reset = BinaryPrimitives.ReadUInt32LittleEndian(prefix.AsSpan(4));
+        return IsRamStack(prefix) && reset > 0 && reset < 0x00010000 && (reset & 1) != 0;
     }
     public void Dispose() { timer?.Dispose(); Reset(); lock (gate) disposed = true; }
 }

@@ -108,6 +108,43 @@ public class ScreenSnapshotTests
         byte[] dump=new byte[1025];dump[0]=0xef;Assert.Empty(broker.Feed(dump,dump.Length).Forward);Assert.Empty(abandoned);
         broker.Reset();broker.Request(Guid.NewGuid(),3,current.Add,_=>writes++);Assert.Equal(2,writes);
     }
+    [Theory][InlineData(1)][InlineData(7)][InlineData(512)]
+    public void FirmwareNullTelemetryPaddingCannotFakeBitmapMarkerOrLeakToLegacy(int chunk)
+    {
+        using var broker=new ScreenSnapshotBroker(startTimer:false);var replies=new List<ScreenSnapshotStateMessage>();
+        broker.Request(Guid.NewGuid(),1,replies.Add,_=>{});
+        byte[] header={0xb5,6,0x84,0,0,216};byte[] padding=new byte[216];
+        // Only the non-personal ARM vector signature from the physical capture.
+        new byte[]{0xf0,0x3f,0x00,0x20,0x0b,0x01,0x00,0x00}.CopyTo(padding,0);
+        padding[50]=0xb5;padding[51]=1;padding[136]=0xef;padding[150]=0xab;
+        byte[] pixels=Enumerable.Range(0,1024).Select(i=>(byte)(i*17)).ToArray();
+        byte[] clear={0xb5,5,0,0,0,0};
+        byte[] stream=header.Concat(padding).Concat(clear).Concat(new byte[]{0xef}).Concat(pixels).ToArray();
+        var forwarded=new List<byte>();
+        for(int i=0;i<stream.Length;i+=chunk){var part=stream.Skip(i).Take(chunk).ToArray();forwarded.AddRange(broker.Feed(part,part.Length).Forward);}
+        Assert.Equal(header.Concat(clear),forwarded);Assert.Single(replies);Assert.Equal(pixels,replies[0].Data);
+        Assert.Null(replies[0].Reason);
+    }
+    [Theory][InlineData(0xb5)][InlineData(0xab)][InlineData(0xef)]
+    public void FixedFirmwareWithoutTelemetryPaddingKeepsFollowingUiBinaryOrBitmap(int marker)
+    {
+        using var broker=new ScreenSnapshotBroker(startTimer:false);var replies=new List<ScreenSnapshotStateMessage>();broker.Request(Guid.NewGuid(),1,replies.Add,_=>{});
+        byte[] header={0xb5,6,0x84,0,0,216};byte[] following=marker==0xb5?new byte[]{0xb5,5,0,0,0,0}:marker==0xab?Frame(0x0951,4):new byte[]{0xef}.Concat(new byte[1024]).ToArray();
+        byte[] stream=header.Concat(following).ToArray();var forwarded=new List<byte>();
+        foreach(byte value in stream)forwarded.AddRange(broker.Feed(new[]{value},1).Forward);
+        Assert.Equal(marker==0xef?header:stream,forwarded);
+        Assert.Equal(marker==0xef?1:0,replies.Count);
+    }
+    [Fact] public void InvalidVectorCandidateIsReplayedInsteadOfDiscardingUnknownData()
+    {
+        using var broker=new ScreenSnapshotBroker(startTimer:false);
+        byte[] header={0xb5,6,0,0,0,216};
+        byte[] badStack={0xf0,0x3f,0,0x10,0x0b,1,0,0}; // Not SRAM.
+        byte[] badReset={0xf0,0x3f,0,0x20,0x0a,1,0,0}; // ARM Reset vector must be Thumb.
+        byte[] stream=header.Concat(badStack).Concat(header).Concat(badReset).ToArray();var forwarded=new List<byte>();
+        foreach(byte value in stream)forwarded.AddRange(broker.Feed(new[]{value},1).Forward);
+        Assert.Equal(stream,forwarded);
+    }
     [Fact] public void ObserverCanReadWithoutControlButTxAndScanBlockQuery()
     {
         var now=DateTime.UtcNow;using var manager=new SessionManager(utcNow:()=>now);

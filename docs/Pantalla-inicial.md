@@ -1,5 +1,13 @@
 # Pantalla inicial sin señal recibida
 
+## Compatibilidad con la telemetría de batería del firmware
+
+El firmware Dock consultado envía el tipo UI 6 con `Length` utilizado como metadato de voltaje y puntero de datos nulo, pero su función UART transmite igualmente `Length` bytes desde la dirección cero. En el MCU esa dirección contiene vectores de Flash, incluidos bytes EF que no son el comienzo de una captura. Una captura pasiva del equipo real confirmó este comportamiento y explicó un desplazamiento aparente de 80 bytes, sin que existiera ninguna rotación de columnas en el framebuffer.
+
+El parser normaliza exclusivamente ese relleno reconocible. Tras una cabecera tipo 6 con longitud suficiente, comprueba ocho bytes: puntero de pila alineado a cuatro en SRAM `0x20000000 < SP <= 0x20004000` y vector de reinicio Thumb impar dentro de ROM `0 < reset < 0x10000`. Si coinciden, suprime exactamente `Length` bytes de relleno, conservando la cabecera de telemetría. Si no coinciden, reproduce los bytes por el parser ordinario; un firmware corregido que envíe directamente B5, AB o EF sigue funcionando. El sondeo se limita a ocho bytes, admite fragmentación de un byte y nunca interpreta bytes de ese relleno como marcadores de pantalla. No se aplica ningún desplazamiento artificial a los píxeles ni se inventan frecuencias.
+
+La reproducción aislada de la captura pasiva completa de 6072 bytes retiró 5748 bytes de relleno en 27 bloques (uno parcial al final de la captura) y conservó exactamente los 324 bytes ordinarios restantes, sin generar ninguna captura de pantalla falsa. El registro físico permanece fuera del repositorio; las pruebas sólo incluyen la firma genérica de ocho bytes y datos sintéticos.
+
 La extensión `screen-snapshot-v1` del control compartido añade `ScreenSnapshotRequest=29` (`RequestId`) y `ScreenSnapshotState=30` (`RequestId`, `Width=128`, `Height=64`, `Data` base64, `CapturedAtUtc` ISO UTC, `Reason`). Sólo se atiende tras la autenticación y el Hello del canal de control; también puede solicitarla un observador sin adquirir control ni TX. Los clientes anteriores no reciben mensajes nuevos espontáneos.
 
 QDNH genera exclusivamente el comando de lectura del framebuffer que ya admite el firmware Quansheng Dock: `0x0803`, timestamp cero, encuadrado y protegido por el XOR/CRC existentes. No simula teclas, cambia frecuencia, habilita PTT ni admite comandos arbitrarios en esta petición. La respuesta del firmware es `EF + 1024 bytes`, ocho páginas verticales de 128 columnas. El servidor retira esos bytes del flujo serie semántico de los clientes anteriores y entrega el mapa sólo por el control de los solicitantes.

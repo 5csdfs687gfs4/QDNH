@@ -15,6 +15,7 @@ namespace QDNH.SharedRadio
     /// </summary>
     public enum ControlMsgType : byte
     {
+        PlaybackReport = 27, PlaybackTarget = 28,
         // Cliente -> servidor
         Hello = 1,
         ControlRequest = 3,
@@ -34,6 +35,8 @@ namespace QDNH.SharedRadio
         HealthRequest = 21, HealthState = 22, OperatorsRequest = 23, OperatorsState = 24, QueueJoin = 25, QueueLeave = 26,
     }
     public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor, int ProtocolVersion = 1, string[]? Capabilities = null);
+    public record PlaybackReportMessage(long RequestId, long ClientTickMs, int RequestedMs, int QueueMs, long Underruns);
+    public record PlaybackTargetMessage(long RequestId, long ClientTickMs, int TargetMs, int QueueMs, long Underruns);
     public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign, int ProtocolVersion = 2, string? ServerVersion = null, string[]? Capabilities = null, string? AuthenticatedUserId = null, string? Role = null);
     public record OperatorInfo(Guid SessionId, string Callsign, bool AudioConnected, bool SerialConnected, bool HasControl, bool HasTx, int QueuePosition, string Role = "Operator");
     public record OperatorsStateMessage(OperatorInfo[] Operators);
@@ -46,9 +49,9 @@ namespace QDNH.SharedRadio
     // ControlOwner quien los conoce (su VFO en pantalla) y los manda
     // aqui al pedir el TX; QDNH solo los reenvia tal cual en
     // TxMonitorStarted para que los demas clientes los muestren.
-    public record RequestTxMessage(double FrequencyMHz, string Modulation);
-    public record TxGrantedMessage(Guid SessionId, string Callsign);
-    public record TxDeniedMessage(string Reason);
-    public record TxReleasedMessage(string Reason);
+    public record RequestTxMessage(double FrequencyMHz, string Modulation, long RequestId = 0);
+    public record TxGrantedMessage(Guid SessionId, string Callsign, long RequestId = 0);
+    public record TxDeniedMessage(string Reason, long RequestId = 0);
+    public record TxReleasedMessage(string Reason, long RequestId = 0, Guid? SessionId = null);
     public record TxMonitorStartedMessage(Guid SessionId, string Callsign, double FrequencyMHz, string Modulation);
 }

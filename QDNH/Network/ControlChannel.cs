@@ -144,6 +144,10 @@ namespace QDNH.Network
                                         sessions.RegisterOrAttach(session.Id, update.Callsign, update.SupportsTxMonitor, sendToThis, update.ProtocolVersion, principal);
                                     break;
                                 case ControlMsgType.HealthRequest: sessions.SendHealth(session.Id); break;
+                                case ControlMsgType.PlaybackReport:
+                                    var report = JsonSerializer.Deserialize<PlaybackReportMessage>(payload);
+                                    if (report != null) sessions.ReportPlayback(session.Id, report);
+                                    break;
                                 case ControlMsgType.OperatorsRequest: sessions.SendOperators(session.Id); break;
                                 case ControlMsgType.QueueJoin: sessions.QueueControl(session.Id, true); break;
                                 case ControlMsgType.QueueLeave: sessions.QueueControl(session.Id, false); break;
@@ -155,7 +159,7 @@ namespace QDNH.Network
                                     break;
                                 case ControlMsgType.RequestTx:
                                     var req = JsonSerializer.Deserialize<RequestTxMessage>(payload);
-                                    if (req != null) sessions.TryRequestTx(session.Id, req.FrequencyMHz, req.Modulation);
+                                    if (req != null) sessions.TryRequestTx(session.Id, req.FrequencyMHz, req.Modulation, req.RequestId);
                                     break;
                                 case ControlMsgType.TxRelease:
                                     sessions.ReleaseTx(session.Id, "PTT_OFF");

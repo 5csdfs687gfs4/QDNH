@@ -12,6 +12,8 @@ namespace QDNH.SharedRadio
     public class SessionInfo
     {
         public Guid Id { get; }
+        public long LastTxRequestId { get; set; }
+        public ClientLatencyPolicy Latency { get; } = new();
         public bool SupportsExtensions { get; set; }
         public OperatorPrincipal? Principal { get; set; }
         public string Callsign { get; set; }

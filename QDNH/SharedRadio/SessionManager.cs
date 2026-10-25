@@ -42,7 +42,7 @@ namespace QDNH.SharedRadio
         private readonly Func<DateTime> utcNow;
         private readonly Action releasePtt;
         public Func<(bool Serial, bool Capture, bool Playback)> HardwareStatus { get; set; } = () => (false, false, false);
-        public static readonly string[] Capabilities = { "health-v1", "operators-v1", "control-queue-v1", "tx-monitor-v1" };
+        public static readonly string[] Capabilities = { "health-v1", "operators-v1", "control-queue-v1", "tx-monitor-v1", "rx-latency-v1", "tx-request-id-v1" };
         private readonly List<Guid> controlQueue = new();
         private readonly Dictionary<Guid, List<byte>> serialPending = new();
         public bool AuthenticationRequired { get; private set; }
@@ -271,7 +271,7 @@ namespace QDNH.SharedRadio
         // TX Lock
         // ------------------------------------------------------------
 
-        public void TryRequestTx(Guid sessionId, double frequencyMHz, string modulation)
+        public void TryRequestTx(Guid sessionId, double frequencyMHz, string modulation, long requestId = 0)
         {
             lock (sync)
             {
@@ -279,24 +279,25 @@ namespace QDNH.SharedRadio
 
                 if (session.Principal?.Role == OperatorRole.Observer)
                 {
-                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("ROLE_OBSERVER")); return;
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("ROLE_OBSERVER", requestId)); return;
                 }
                 if (txOutputFault)
                 {
-                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("TX_OUTPUT_UNAVAILABLE")); return;
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("TX_OUTPUT_UNAVAILABLE", requestId)); return;
                 }
                 if (ControlOwnerSessionId != sessionId)
                 {
-                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("NOT_IN_CONTROL"));
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("NOT_IN_CONTROL", requestId));
                     return;
                 }
                 if (TxOwnerSessionId != null && TxOwnerSessionId != sessionId)
                 {
-                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("TX_BUSY"));
+                    SendTo(session, ControlMsgType.TxDenied, new TxDeniedMessage("TX_BUSY", requestId));
                     return;
                 }
 
                 if (TxOwnerSessionId == sessionId) return; // No reiniciar el límite máximo con peticiones repetidas.
+                session.LastTxRequestId = requestId;
                 session.LastFrequencyMHz = frequencyMHz;
                 session.LastModulation = modulation;
                 TxOwnerSessionId = sessionId;
@@ -304,7 +305,7 @@ namespace QDNH.SharedRadio
                 txLeaseExpiresUtc = utcNow() + TxLeaseTimeout;
                 txStartedUtc = utcNow();
                 Vars.Out($"[SharedRadio] TX concedido a {session.Callsign} ({frequencyMHz:F4} MHz {modulation})");
-                Broadcast(ControlMsgType.TxGranted, new TxGrantedMessage(sessionId, session.Callsign));
+                Broadcast(ControlMsgType.TxGranted, new TxGrantedMessage(sessionId, session.Callsign, requestId));
                 BroadcastOperators();
             }
         }
@@ -321,7 +322,7 @@ namespace QDNH.SharedRadio
                 monitorAnnounced = false;
                 txLeaseExpiresUtc = DateTime.MaxValue;
                 Vars.Out($"[SharedRadio] TX_MONITOR_STOPPED reason={reason}");
-                Broadcast(ControlMsgType.TxReleased, new TxReleasedMessage(reason));
+                Broadcast(ControlMsgType.TxReleased, new TxReleasedMessage(reason, sessions.TryGetValue(sessionId, out var owner) ? owner.LastTxRequestId : 0, sessionId));
                 Broadcast(ControlMsgType.TxMonitorStopped, null, s => s.SupportsTxMonitor && s.Id != sessionId);
                 BroadcastOperators();
             }
@@ -472,6 +473,17 @@ namespace QDNH.SharedRadio
                 var h = HardwareStatus();
                 SendTo(s, ControlMsgType.HealthState, new HealthStateMessage(Vars.Version, 2, h.Serial, h.Capture, h.Playback,
                     sessions.Values.Count(x => x.SendControl != null), Vars.TxLeaseSeconds, Vars.MaxTxSeconds, AdvertisedCapabilities));
+            }
+        }
+
+        public void ReportPlayback(Guid id, PlaybackReportMessage report)
+        {
+            lock (sync)
+            {
+                if (!sessions.TryGetValue(id, out var session) || !session.SupportsExtensions || session.SendControl == null) return;
+                int target = session.Latency.Observe(report.RequestedMs, report.QueueMs, report.Underruns);
+                SendTo(session, ControlMsgType.PlaybackTarget, new PlaybackTargetMessage(report.RequestId,
+                    report.ClientTickMs, target, Math.Clamp(report.QueueMs, 0, 10000), Math.Max(0, report.Underruns)));
             }
         }
         // Los límites de TCP no son límites de paquetes CAT. Reensamblar antes de autorizar PTT.

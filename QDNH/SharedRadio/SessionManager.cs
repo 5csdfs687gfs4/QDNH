@@ -41,8 +41,12 @@ namespace QDNH.SharedRadio
         private bool txOutputFault;
         private readonly Func<DateTime> utcNow;
         private readonly Action releasePtt;
+        private readonly ScreenSnapshotBroker screenSnapshots;
+        private bool serialScanActive;
+        private DateTime screenReadsAllowedAfter;
+        public Action<byte[]>? ReadScreenCommand { get; set; }
         public Func<(bool Serial, bool Capture, bool Playback)> HardwareStatus { get; set; } = () => (false, false, false);
-        public static readonly string[] Capabilities = { "health-v1", "operators-v1", "control-queue-v1", "tx-monitor-v1", "rx-latency-v1", "tx-request-id-v1" };
+        public static readonly string[] Capabilities = { "health-v1", "operators-v1", "control-queue-v1", "tx-monitor-v1", "rx-latency-v1", "tx-request-id-v1", "screen-snapshot-v1" };
         private readonly List<Guid> controlQueue = new();
         private readonly Dictionary<Guid, List<byte>> serialPending = new();
         public bool AuthenticationRequired { get; private set; }
@@ -69,6 +73,8 @@ namespace QDNH.SharedRadio
         {
             this.releasePtt = releasePtt ?? (() => { });
             this.utcNow = utcNow ?? (() => DateTime.UtcNow);
+            screenSnapshots = new ScreenSnapshotBroker(this.utcNow);
+            screenReadsAllowedAfter = this.utcNow().AddSeconds(3);
             txWatchdog = new Timer(_ => CheckTxLease(), null, 1000, 1000);
         }
 
@@ -80,6 +86,7 @@ namespace QDNH.SharedRadio
                 sessions.Clear(); controlQueue.Clear(); serialPending.Clear(); lastAudioRejectLogUtc.Clear();
                 AuthenticationRequired = authenticationRequired;
                 txOutputFault = false;
+                serialScanActive = false; screenReadsAllowedAfter = utcNow().AddSeconds(3); screenSnapshots.Reset();
             }
         }
         private SessionInfo BindSession(Guid id, OperatorPrincipal? principal, string callsign, bool monitor)
@@ -193,6 +200,7 @@ namespace QDNH.SharedRadio
                 lastAudioRejectLogUtc.TryRemove(sessionId, out _);
                 controlQueue.Remove(sessionId); serialPending.Remove(sessionId);
                 current.SendControl = null;
+                screenSnapshots.Forget(sessionId);
                 Vars.Out($"[SharedRadio] sesion desconectada: {current.Callsign} ({sessionId})");
 
                 // A stale socket must not clear the replacement connection's
@@ -341,7 +349,7 @@ namespace QDNH.SharedRadio
         {
             lock (sync) if (TxOwnerSessionId is Guid owner) ReleaseTx(owner, reason);
         }
-        public void Dispose() { txWatchdog.Dispose(); ReleaseAnyTx("SERVER_STOPPED"); }
+        public void Dispose() { txWatchdog.Dispose(); screenSnapshots.Dispose(); ReleaseAnyTx("SERVER_STOPPED"); }
 
         // ------------------------------------------------------------
         // Audio TX real: punto de entrada UNICO desde Main.cs para cada
@@ -486,6 +494,44 @@ namespace QDNH.SharedRadio
                     report.ClientTickMs, target, Math.Clamp(report.QueueMs, 0, 10000), Math.Max(0, report.Underruns)));
             }
         }
+        public void RequestScreenSnapshot(Guid id, ScreenSnapshotRequestMessage request)
+        {
+            lock (sync)
+            {
+                if (!sessions.TryGetValue(id, out var session) || !session.SupportsExtensions || session.SendControl == null) return;
+                var control = session.SendControl;
+                void Reply(ScreenSnapshotStateMessage response)
+                {
+                    lock (sync)
+                        if (sessions.TryGetValue(id, out var current) && ReferenceEquals(current.SendControl, control))
+                            SendTo(current, ControlMsgType.ScreenSnapshotState, response);
+                }
+                // Same lock as TryRequestTx/ForwardSerial: no TX/scan can begin between this check and UART.Write.
+                if (TxOwnerSessionId != null || serialScanActive || utcNow() < screenReadsAllowedAfter)
+                    Reply(ScreenSnapshotBroker.Failure(request.RequestId, "busy"));
+                else if (!HardwareStatus().Serial || ReadScreenCommand == null)
+                    Reply(ScreenSnapshotBroker.Failure(request.RequestId, "serial-unavailable"));
+                else screenSnapshots.Request(id, request.RequestId, Reply, ReadScreenCommand);
+            }
+        }
+        public byte[] FilterScreenSnapshotSerial(byte[] data, int length)
+        {
+            lock (sync)
+            {
+                var parsed = screenSnapshots.Feed(data, length);
+                if (parsed.ScanReply) serialScanActive = true;
+                return parsed.Forward;
+            }
+        }
+        public void ScreenSerialDisconnected()
+        {
+            lock (sync)
+            {
+                // A scan may still be running on the radio after the PC loses UART.
+                // Keep that conservative busy flag until an authorized command stops it.
+                screenReadsAllowedAfter = utcNow().AddSeconds(3); screenSnapshots.Reset();
+            }
+        }
         // Los límites de TCP no son límites de paquetes CAT. Reensamblar antes de autorizar PTT.
         public void ForwardSerial(Guid id, byte[] data, int length, Action<byte[], int, int> send, Action<byte[], int>? source = null)
         {
@@ -505,6 +551,14 @@ namespace QDNH.SharedRadio
                     byte[] frame = pending.Take(size).ToArray(); pending.RemoveRange(0, size);
                     if (frame[^2] != 0xdc || frame[^1] != 0xba) continue;
                     if (QDNH.Serial.RadioProtocol.IsPttOn(frame) && TxOwnerSessionId != id) continue;
+                    if (QDNH.Serial.RadioProtocol.IsValidFrame(frame))
+                    {
+                        ushort command = QDNH.Serial.RadioProtocol.CommandId(frame);
+                        if (command == 0x0808) serialScanActive = true; // Conservative even for incomplete/invalid scan parameters.
+                        else if (command == 0x0809) { if (frame.Length >= 22 && QDNH.Serial.RadioProtocol.ScanDensity(frame) == 0) serialScanActive = false; }
+                        else serialScanActive = false; // Firmware exits CMD_0808 on every other authorized valid command.
+                    }
+                    screenSnapshots.InvalidateCache();
                     send(frame, 0, frame.Length);
                 }
             }

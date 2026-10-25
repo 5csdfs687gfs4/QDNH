@@ -144,6 +144,10 @@ namespace QDNH.Network
                                         sessions.RegisterOrAttach(session.Id, update.Callsign, update.SupportsTxMonitor, sendToThis, update.ProtocolVersion, principal);
                                     break;
                                 case ControlMsgType.HealthRequest: sessions.SendHealth(session.Id); break;
+                                case ControlMsgType.ScreenSnapshotRequest:
+                                    var screen = JsonSerializer.Deserialize<ScreenSnapshotRequestMessage>(payload);
+                                    if (screen != null) sessions.RequestScreenSnapshot(session.Id, screen);
+                                    break;
                                 case ControlMsgType.PlaybackReport:
                                     var report = JsonSerializer.Deserialize<PlaybackReportMessage>(payload);
                                     if (report != null) sessions.ReportPlayback(session.Id, report);

@@ -16,6 +16,7 @@ namespace QDNH.SharedRadio
     public enum ControlMsgType : byte
     {
         PlaybackReport = 27, PlaybackTarget = 28,
+        ScreenSnapshotRequest = 29, ScreenSnapshotState = 30,
         // Cliente -> servidor
         Hello = 1,
         ControlRequest = 3,
@@ -37,6 +38,8 @@ namespace QDNH.SharedRadio
     public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor, int ProtocolVersion = 1, string[]? Capabilities = null);
     public record PlaybackReportMessage(long RequestId, long ClientTickMs, int RequestedMs, int QueueMs, long Underruns);
     public record PlaybackTargetMessage(long RequestId, long ClientTickMs, int TargetMs, int QueueMs, long Underruns);
+    public record ScreenSnapshotRequestMessage(long RequestId);
+    public record ScreenSnapshotStateMessage(long RequestId, int Width, int Height, byte[] Data, string? CapturedAtUtc, string? Reason);
     public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign, int ProtocolVersion = 2, string? ServerVersion = null, string[]? Capabilities = null, string? AuthenticatedUserId = null, string? Role = null);
     public record OperatorInfo(Guid SessionId, string Callsign, bool AudioConnected, bool SerialConnected, bool HasControl, bool HasTx, int QueuePosition, string Role = "Operator");
     public record OperatorsStateMessage(OperatorInfo[] Operators);

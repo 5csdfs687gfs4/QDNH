@@ -521,7 +521,7 @@ namespace QDNH
                 multiSerialServer = null;
                 if (!Vars.ComPort.Equals(Lang.Disabled))
                 {
-                    try { serialPort = new(Vars.ComPort, SerialDataCallback, () => sessions.ReleaseAnyTx("SERIAL_LOST")); } catch { }
+                    try { serialPort = new(Vars.ComPort, SerialDataCallback, () => { sessions.ReleaseAnyTx("SERIAL_LOST"); sessions.ScreenSerialDisconnected(); }); } catch { }
                 }
                 if (Vars.SharedRadioMode)
                 {
@@ -584,6 +584,7 @@ namespace QDNH
             if (Vars.SharedRadioMode)
             {
                 sessions.HardwareStatus = () => (serialPort?.IsConnected == true, capture != null, playback != null);
+                sessions.ReadScreenCommand = frame => serialPort?.Send(frame, 0, frame.Length);
                 try { controlChannel = new(Vars.NetworkPort + 2, sessions, operatorAuthentication); } catch { }
             }
             System.Threading.Interlocked.Exchange(ref initializedAtTick, Stopwatch.GetTimestamp());
@@ -631,7 +632,10 @@ namespace QDNH
         private static void SerialDataCallback(byte[] data, int length)
         {
             if (Vars.SharedRadioMode)
-                sessions.FanOutSerialRx(data, length);
+            {
+                byte[] ordinary = sessions.FilterScreenSnapshotSerial(data, length);
+                if (ordinary.Length > 0) sessions.FanOutSerialRx(ordinary, ordinary.Length);
+            }
             else
                 serialServer?.Send(data, 0, length);
         }

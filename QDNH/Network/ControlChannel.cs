@@ -4,6 +4,7 @@ using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace QDNH.Network
@@ -80,6 +81,11 @@ namespace QDNH.Network
                 if (!auth.Challenge(chal)) return;
 
                 SessionInfo? session = null;
+                Action<byte[]>? sendToThis = null;
+                // Every response for this connection shares one framed stream.
+                // Serialize writes so concurrent broadcasts cannot interleave
+                // their headers and payloads on the wire.
+                SemaphoreSlim writeGate = new(1, 1);
                 try
                 {
                     while (!closed)
@@ -98,8 +104,8 @@ namespace QDNH.Network
                             if (hello == null) break;
 
                             NetworkStream st = stream;
-                            void SendToThis(byte[] frame) => _ = WriteMessage(st, frame);
-                            session = sessions.RegisterOrAttach(hello.SessionId, hello.Callsign, hello.SupportsTxMonitor, SendToThis);
+                            sendToThis = frame => _ = WriteMessage(st, frame, writeGate);
+                            session = sessions.RegisterOrAttach(hello.SessionId, hello.Callsign, hello.SupportsTxMonitor, sendToThis);
                             continue;
                         }
 
@@ -124,8 +130,8 @@ namespace QDNH.Network
                 catch { }
                 finally
                 {
-                    if (session != null)
-                        sessions.OnControlChannelClosed(session.Id);
+                    if (session != null && sendToThis != null)
+                        sessions.OnControlChannelClosed(session.Id, sendToThis);
                 }
             }
         }
@@ -156,9 +162,18 @@ namespace QDNH.Network
             return true;
         }
 
-        private static async Task WriteMessage(NetworkStream stream, byte[] frame)
+        private static async Task WriteMessage(NetworkStream stream, byte[] frame, SemaphoreSlim writeGate)
         {
-            try { await stream.WriteAsync(frame); await stream.FlushAsync(); }
+            try
+            {
+                await writeGate.WaitAsync();
+                try
+                {
+                    await stream.WriteAsync(frame);
+                    await stream.FlushAsync();
+                }
+                finally { writeGate.Release(); }
+            }
             catch { }
         }
     }

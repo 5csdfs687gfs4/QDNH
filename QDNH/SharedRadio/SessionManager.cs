@@ -69,18 +69,21 @@ namespace QDNH.SharedRadio
         /// estado actual de control/TX.</summary>
         public SessionInfo RegisterOrAttach(Guid sessionId, string callsign, bool supportsTxMonitor, Action<byte[]> sendControl)
         {
-            SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, callsign, supportsTxMonitor));
-            session.Callsign = callsign;
-            session.SupportsTxMonitor = supportsTxMonitor;
-            session.SendControl = sendControl;
-            Vars.Out($"[SharedRadio] sesion conectada: {callsign} ({sessionId})");
+            lock (sync)
+            {
+                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, callsign, supportsTxMonitor));
+                session.Callsign = callsign;
+                session.SupportsTxMonitor = supportsTxMonitor;
+                session.SendControl = sendControl;
+                Vars.Out($"[SharedRadio] sesion conectada: {callsign} ({sessionId})");
 
-            string? controlCallsign = ControlOwnerSessionId != null && sessions.TryGetValue(ControlOwnerSessionId.Value, out var co) ? co.Callsign : null;
-            string? txCallsign = TxOwnerSessionId != null && sessions.TryGetValue(TxOwnerSessionId.Value, out var to) ? to.Callsign : null;
-            SendTo(session, ControlMsgType.HelloAck,
-                new HelloAckMessage(ControlOwnerSessionId != null, controlCallsign, TxOwnerSessionId != null, txCallsign));
+                string? controlCallsign = ControlOwnerSessionId != null && sessions.TryGetValue(ControlOwnerSessionId.Value, out var co) ? co.Callsign : null;
+                string? txCallsign = TxOwnerSessionId != null && sessions.TryGetValue(TxOwnerSessionId.Value, out var to) ? to.Callsign : null;
+                SendTo(session, ControlMsgType.HelloAck,
+                    new HelloAckMessage(ControlOwnerSessionId != null, controlCallsign, TxOwnerSessionId != null, txCallsign));
 
-            return session;
+                return session;
+            }
         }
 
         /// <summary>Asocia el canal de audio de MultiListen a una sesion.
@@ -89,43 +92,61 @@ namespace QDNH.SharedRadio
         /// del canal de control completara enseguida.</summary>
         public SessionInfo AttachAudio(Guid sessionId, Action<byte[], int> sendAudio)
         {
-            SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
-            session.SendAudio = sendAudio;
-            return session;
+            lock (sync)
+            {
+                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
+                session.SendAudio = sendAudio;
+                return session;
+            }
         }
 
         public SessionInfo AttachSerial(Guid sessionId, Action<byte[], int> sendSerial)
         {
-            SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
-            session.SendSerial = sendSerial;
-            return session;
+            lock (sync)
+            {
+                SessionInfo session = sessions.GetOrAdd(sessionId, _ => new SessionInfo(sessionId, "?", false));
+                session.SendSerial = sendSerial;
+                return session;
+            }
         }
 
-        public void OnAudioChannelClosed(Guid sessionId)
+        public void OnAudioChannelClosed(Guid sessionId, Action<byte[], int> sendAudio)
         {
-            if (sessions.TryGetValue(sessionId, out var s)) s.SendAudio = null;
-            // Sin audio no hay TX posible: si esta sesion tenia el TX, se
-            // suelta igual que si hubiera soltado el PTT.
-            if (TxOwnerSessionId == sessionId) ReleaseTx(sessionId, "SESSION_LOST");
+            lock (sync)
+            {
+                if (!sessions.TryGetValue(sessionId, out var s) || !ReferenceEquals(s.SendAudio, sendAudio)) return;
+                s.SendAudio = null;
+                // Sin audio no hay TX posible: si esta sesion tenia el TX, se
+                // suelta igual que si hubiera soltado el PTT.
+                if (TxOwnerSessionId == sessionId) ReleaseTx(sessionId, "SESSION_LOST");
+            }
         }
 
-        public void OnSerialChannelClosed(Guid sessionId)
+        public void OnSerialChannelClosed(Guid sessionId, Action<byte[], int> sendSerial)
         {
-            if (sessions.TryGetValue(sessionId, out var s)) s.SendSerial = null;
+            lock (sync)
+            {
+                if (sessions.TryGetValue(sessionId, out var s) && ReferenceEquals(s.SendSerial, sendSerial))
+                    s.SendSerial = null;
+            }
         }
 
-        public void OnControlChannelClosed(Guid sessionId)
+        public void OnControlChannelClosed(Guid sessionId, Action<byte[]> sendControl)
         {
-            lastAudioRejectLogUtc.TryRemove(sessionId, out _);
-            if (sessions.TryRemove(sessionId, out var s))
-                Vars.Out($"[SharedRadio] sesion desconectada: {s.Callsign} ({sessionId})");
+            lock (sync)
+            {
+                if (!sessions.TryGetValue(sessionId, out var current) ||
+                    !ReferenceEquals(current.SendControl, sendControl)) return;
 
-            // Failsafe: perder el canal de control implica perder tanto
-            // el TX como el control, sin excepciones -- nunca se asume
-            // que la sesion sigue teniendo cualquiera de los dos solo
-            // porque el audio/serie sigan abiertos un instante mas.
-            if (TxOwnerSessionId == sessionId) ReleaseTx(sessionId, "SESSION_LOST");
-            if (ControlOwnerSessionId == sessionId) ReleaseControlInternal("SESSION_LOST");
+                lastAudioRejectLogUtc.TryRemove(sessionId, out _);
+                if (sessions.TryRemove(sessionId, out var s))
+                    Vars.Out($"[SharedRadio] sesion desconectada: {s.Callsign} ({sessionId})");
+
+                // A stale socket must not clear the replacement connection's
+                // control or TX ownership after a fast reconnect.
+                if (TxOwnerSessionId == sessionId) ReleaseTx(sessionId, "SESSION_LOST");
+                if (ControlOwnerSessionId == sessionId) ReleaseControlInternal("SESSION_LOST");
+            }
         }
 
         // ------------------------------------------------------------

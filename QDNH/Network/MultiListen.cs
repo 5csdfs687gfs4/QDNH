@@ -138,7 +138,13 @@ namespace QDNH.Network
                         Vars.Out($"[SharedRadio] frame descartado (cola llena) sesion={sessionId}");
                 }
 
-                onConnected(sessionId, Send);
+                // Una sola instancia del delegado para alta y baja: SessionManager
+                // identifica cada conexion por ReferenceEquals sobre el delegado
+                // (asi un socket viejo no puede liberar la sesion de uno nuevo).
+                // Convertir la funcion local dos veces crea dos delegados
+                // distintos y la baja dejaria de reconocer la sesion.
+                Action<byte[], int> send = Send;
+                onConnected(sessionId, send);
 
                 Task sender = Task.Run(async () =>
                 {
@@ -176,7 +182,7 @@ namespace QDNH.Network
                     // Do not keep the session (and its TX lock) alive forever
                     // while the outgoing writer is blocked on that socket.
                     try { await sender.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
-                    onDisconnected(sessionId, Send);
+                    onDisconnected(sessionId, send);
                 }
             }
         }

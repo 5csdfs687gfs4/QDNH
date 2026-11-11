@@ -155,7 +155,14 @@ namespace QDNH.Network
                     if (!queue.Writer.TryWrite((copy, length)))
                         client.Dispose(); // Nunca perder bytes serie silenciosamente: cerrar el cliente lento.
                 }
-                try { onConnected(sessionId, Send, principal); } catch (UnauthorizedAccessException) { return; }
+                // Una sola instancia del delegado para alta, datos y baja:
+                // SessionManager identifica cada conexion por ReferenceEquals
+                // sobre el delegado (asi un socket viejo no puede liberar la
+                // sesion de uno nuevo). Convertir la funcion local varias
+                // veces crea delegados distintos y la baja dejaria de
+                // reconocer la sesion.
+                Action<byte[], int> send = Send;
+                try { onConnected(sessionId, send, principal); } catch (UnauthorizedAccessException) { return; }
                 Task sender = Task.Run(async () =>
                 {
                     await foreach (var item in queue.Reader.ReadAllAsync())
@@ -180,9 +187,9 @@ namespace QDNH.Network
                         {
                             // El puerto de audio solo encola muestras completas: DropOldest conserva paridad.
                             byte[] complete = pcm.Push(b, br);
-                            if (complete.Length > 0) callback(sessionId, Send, complete, complete.Length);
+                            if (complete.Length > 0) callback(sessionId, send, complete, complete.Length);
                         }
-                        else callback(sessionId, Send, b, br);
+                        else callback(sessionId, send, b, br);
                     }
                 }
                 finally
@@ -194,7 +201,7 @@ namespace QDNH.Network
                     Vars.Out($"[SharedRadio] cliente desconectado sesion={sessionId} " +
                              $"duracion={secs:F1}s recibidos={bytesInThisConn}B motivo={reason}");
                     queue.Writer.TryComplete();
-                    onDisconnected(sessionId, Send);
+                    onDisconnected(sessionId, send);
                     client.Dispose();
                     // A peer can close its write half while no longer reading.
                     // Do not keep the session (and its TX lock) alive forever

@@ -1,3 +1,5 @@
+using QDNH.Audio;
+using QDNH.Security;
 using QDNH.Settings;
 using System;
 using System.Net;
@@ -5,7 +7,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-
+using System.Collections.Concurrent;
+using System.Threading;
 namespace QDNH.Network
 {
     /// <summary>
@@ -30,36 +33,48 @@ namespace QDNH.Network
     public class MultiListen
     {
         private readonly TcpListener listener;
-        private readonly Action<Guid, byte[], int> callback;
-        private readonly Func<Guid, Action<byte[], int>, object> onConnected;
+        public bool IsListening
+        {
+            get
+            {
+                try { return !closed && listener.Server.IsBound && loop != null && !loop.IsCompleted; }
+                catch (ObjectDisposedException) { return false; }
+                catch (SocketException) { return false; }
+            }
+        }
+        private readonly OperatorAuthentication? authentication;
+        private readonly Action<Guid, Action<byte[], int>, byte[], int> callback;
+        private readonly Func<Guid, Action<byte[], int>, OperatorPrincipal?, object> onConnected;
         private readonly Action<Guid, Action<byte[], int>> onDisconnected;
-        private bool closed = false;
+        private volatile bool closed = false;
+        private readonly ConcurrentDictionary<TcpClient, byte> clients = new();
+        private readonly bool dropOldest;
         private readonly Task loop;
-
         public MultiListen(
             int port,
-            Action<Guid, byte[], int> callback,
-            Func<Guid, Action<byte[], int>, object> onConnected,
-            Action<Guid, Action<byte[], int>> onDisconnected)
+            Action<Guid, Action<byte[], int>, byte[], int> callback,
+            Func<Guid, Action<byte[], int>, OperatorPrincipal?, object> onConnected,
+            Action<Guid, Action<byte[], int>> onDisconnected, bool dropOldest = true, OperatorAuthentication? authentication = null)
         {
             this.callback = callback;
+            this.authentication = authentication;
+            this.dropOldest = dropOldest;
             this.onConnected = onConnected;
             this.onDisconnected = onDisconnected;
             listener = new(IPAddress.Any, port);
             listener.Start();
             loop = Loop();
         }
-
         public void Close()
         {
             using (loop)
             {
                 closed = true;
                 try { listener.Stop(); } catch { }
+                foreach (var client in clients.Keys) client.Dispose();
                 loop.Wait();
             }
         }
-
         private async Task Loop()
         {
             while (!closed)
@@ -67,10 +82,11 @@ namespace QDNH.Network
                 TcpClient client;
                 try { client = await listener.AcceptTcpClientAsync(); }
                 catch { continue; }
-                _ = Task.Run(() => HandleClient(client));
+                if (clients.Count >= 64) { client.Dispose(); continue; }
+                clients.TryAdd(client, 0);
+                _ = Task.Run(async () => { try { await HandleClient(client); } finally { clients.TryRemove(client, out _); } });
             }
         }
-
         private async Task HandleClient(TcpClient client)
         {
             using (client)
@@ -81,32 +97,36 @@ namespace QDNH.Network
                 // mas notable en WAN, donde puede dar la impresion de un
                 // corte de conexion entero en vez de simple latencia.
                 try { client.NoDelay = true; } catch { }
+                client.ReceiveTimeout = 10000;
                 NetworkStream stream = client.GetStream();
-
                 Authenticator auth = new(Vars.Password);
                 try { await stream.WriteAsync(auth.Salt); await stream.FlushAsync(); } catch { return; }
                 byte[] chal = new byte[auth.Hash.Length];
-                for (int i = 0; i < chal.Length; i++)
+                try
                 {
-                    int b;
-                    try { b = stream.ReadByte(); } catch { b = -1; }
-                    if (b < 0) return;
-                    chal[i] = (byte)b;
+                    int received = 0;
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    while (received < chal.Length)
+                    {
+                        int count = await stream.ReadAsync(chal.AsMemory(received), timeout.Token);
+                        if (count == 0) return;
+                        received += count;
+                    }
                 }
-                if (!auth.Challenge(chal)) return;
-
+                catch { return; }
+                OperatorPrincipal? principal = authentication?.Authenticate(chal, auth.Salt);
+                if (authentication != null ? principal == null : !auth.Challenge(chal)) return;
                 byte[] idBytes = new byte[16];
                 int got = 0;
                 while (got < 16)
                 {
                     int n;
-                    try { n = await stream.ReadAsync(idBytes.AsMemory(got, 16 - got)); }
+                    try { n = await stream.ReadAsync(idBytes.AsMemory(got, 16 - got)).AsTask().WaitAsync(TimeSpan.FromSeconds(10)); }
                     catch { n = 0; }
                     if (n <= 0) return;
                     got += n;
                 }
                 Guid sessionId = new(idBytes);
-
                 // Herramienta de diagnostico (ago-2026, desconexiones
                 // intermitentes de Shared Radio Mode sobre WAN): duracion
                 // de esta conexion y bytes recibidos, para poder loguear
@@ -117,7 +137,6 @@ namespace QDNH.Network
                 // otro lado.
                 DateTime connectedAtUtc = DateTime.UtcNow;
                 long bytesInThisConn = 0;
-
                 // Cola acotada propia de este cliente para lo que le
                 // enviemos (RX real, telemetria serie o copia de TX
                 // Monitor, segun el puerto). Descarta lo mas antiguo si
@@ -126,35 +145,33 @@ namespace QDNH.Network
                 var queue = Channel.CreateBounded<(byte[] Buffer, int Length)>(
                     new BoundedChannelOptions(16)
                     {
-                        FullMode = BoundedChannelFullMode.DropOldest,
+                        FullMode = dropOldest ? BoundedChannelFullMode.DropOldest : BoundedChannelFullMode.Wait,
                         SingleReader = true,
                     });
-
                 void Send(byte[] data, int length)
                 {
                     byte[] copy = new byte[length];
                     Array.Copy(data, copy, length);
                     if (!queue.Writer.TryWrite((copy, length)))
-                        Vars.Out($"[SharedRadio] frame descartado (cola llena) sesion={sessionId}");
+                        client.Dispose(); // Nunca perder bytes serie silenciosamente: cerrar el cliente lento.
                 }
-
-                // Una sola instancia del delegado para alta y baja: SessionManager
-                // identifica cada conexion por ReferenceEquals sobre el delegado
-                // (asi un socket viejo no puede liberar la sesion de uno nuevo).
-                // Convertir la funcion local dos veces crea dos delegados
-                // distintos y la baja dejaria de reconocer la sesion.
+                // Una sola instancia del delegado para alta, datos y baja:
+                // SessionManager identifica cada conexion por ReferenceEquals
+                // sobre el delegado (asi un socket viejo no puede liberar la
+                // sesion de uno nuevo). Convertir la funcion local varias
+                // veces crea delegados distintos y la baja dejaria de
+                // reconocer la sesion.
                 Action<byte[], int> send = Send;
-                onConnected(sessionId, send);
-
+                try { onConnected(sessionId, send, principal); } catch (UnauthorizedAccessException) { return; }
                 Task sender = Task.Run(async () =>
                 {
                     await foreach (var item in queue.Reader.ReadAllAsync())
                     {
-                        try { await stream.WriteAsync(item.Buffer.AsMemory(0, item.Length)); await stream.FlushAsync(); }
-                        catch { break; }
+                        try { await stream.WriteAsync(item.Buffer.AsMemory(0, item.Length)).AsTask().WaitAsync(TimeSpan.FromSeconds(3)); }
+                        catch { client.Dispose(); break; }
                     }
                 });
-
+                var pcm = new Pcm16BlockAssembler();
                 Exception? lastException = null;
                 try
                 {
@@ -166,7 +183,13 @@ namespace QDNH.Network
                         catch (Exception ex) { lastException = ex; br = -1; }
                         if (br <= 0) break;
                         bytesInThisConn += br;
-                        callback(sessionId, b, br);
+                        if (dropOldest)
+                        {
+                            // El puerto de audio solo encola muestras completas: DropOldest conserva paridad.
+                            byte[] complete = pcm.Push(b, br);
+                            if (complete.Length > 0) callback(sessionId, send, complete, complete.Length);
+                        }
+                        else callback(sessionId, send, b, br);
                     }
                 }
                 finally
@@ -178,15 +201,15 @@ namespace QDNH.Network
                     Vars.Out($"[SharedRadio] cliente desconectado sesion={sessionId} " +
                              $"duracion={secs:F1}s recibidos={bytesInThisConn}B motivo={reason}");
                     queue.Writer.TryComplete();
+                    onDisconnected(sessionId, send);
+                    client.Dispose();
                     // A peer can close its write half while no longer reading.
                     // Do not keep the session (and its TX lock) alive forever
                     // while the outgoing writer is blocked on that socket.
                     try { await sender.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
-                    onDisconnected(sessionId, send);
                 }
             }
         }
-
         // Herramienta de diagnostico: recorre ex.InnerException (hasta 4
         // niveles) para sacar a la luz el SocketException real cuando lo
         // hay -- el mensaje externo (p.ej. de un IOException) casi nunca

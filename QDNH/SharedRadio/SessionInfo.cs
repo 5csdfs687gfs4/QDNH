@@ -1,5 +1,5 @@
+using QDNH.Security;
 using System;
-
 namespace QDNH.SharedRadio
 {
     /// <summary>
@@ -12,17 +12,17 @@ namespace QDNH.SharedRadio
     public class SessionInfo
     {
         public Guid Id { get; }
+        public bool SupportsExtensions { get; set; }
+        public OperatorPrincipal? Principal { get; set; }
         public string Callsign { get; set; }
         public DateTime ConnectedUtc { get; } = DateTime.UtcNow;
         public bool SupportsTxMonitor { get; set; }
-
         // Ultima frecuencia/modulacion que esta sesion declaro al pedir
         // el TX (ver RequestTxMessage en ControlMessage.cs) -- QDNH no
         // las conoce por si mismo, solo las guarda para poder incluirlas
         // en TxMonitorStarted cuando empiece a repartir su audio.
         public double LastFrequencyMHz { get; set; }
         public string LastModulation { get; set; } = "FM";
-
         // Delegados de envio de cada canal, rellenados por
         // Network/ControlChannel.cs y Network/MultiListen.cs cuando cada
         // conexion de esta sesion queda establecida. Pueden ser null si
@@ -32,7 +32,6 @@ namespace QDNH.SharedRadio
         public Action<byte[]>? SendControl { get; set; }
         public Action<byte[], int>? SendAudio { get; set; }
         public Action<byte[], int>? SendSerial { get; set; }
-
         public SessionInfo(Guid id, string callsign, bool supportsTxMonitor)
         {
             Id = id;

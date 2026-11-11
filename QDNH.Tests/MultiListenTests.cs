@@ -36,8 +36,8 @@ public class MultiListenTests
 
         var multi = new MultiListen(
             port,
-            (_, _, _) => { },
-            (sessionId, send) =>
+            (_, _, _, _) => { },
+            (sessionId, send, principal) =>
             {
                 attachedId = sessionId;
                 attachedSend = send;

@@ -1,10 +1,9 @@
-﻿using QDNH.Settings;
+using QDNH.Settings;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-
 namespace QDNH.Audio
 {
     public class AlsaStream : Stream
@@ -29,6 +28,16 @@ namespace QDNH.Audio
             // So we need to fabricate a WAV header for the stream so the library sees it as a WAV file
             // being pumped in.
             wpos = ALSA.WavHeader(buf, 0);
+        }
+        public void ClearPending()
+        {
+            lock (buf)
+            {
+                Array.Clear(buf, 0, buf.Length);
+                // La cabecera solo es necesaria mientras el consumidor aún no la haya leído.
+                if (rpos < 44) ALSA.WavHeader(buf, 0);
+                wpos = Math.Max(44, rpos + latency);
+            }
         }
         public void Append(byte[] data, int length)
         {

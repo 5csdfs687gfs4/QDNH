@@ -1,5 +1,4 @@
 using System;
-
 namespace QDNH.SharedRadio
 {
     /// <summary>
@@ -22,7 +21,6 @@ namespace QDNH.SharedRadio
         ControlRelease = 13,
         RequestTx = 7,
         TxRelease = 14,
-
         // Servidor -> cliente(s)
         HelloAck = 2,
         ControlGranted = 4,
@@ -33,16 +31,15 @@ namespace QDNH.SharedRadio
         TxReleased = 10,
         TxMonitorStarted = 11,
         TxMonitorStopped = 12,
+        HealthRequest = 21, HealthState = 22, OperatorsRequest = 23, OperatorsState = 24, QueueJoin = 25, QueueLeave = 26,
     }
-
-    public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor);
-
-    public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign);
-
+    public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor, int ProtocolVersion = 1, string[]? Capabilities = null);
+    public record HelloAckMessage(bool ControlHeld, string? ControlCallsign, bool TxHeld, string? TxCallsign, int ProtocolVersion = 2, string? ServerVersion = null, string[]? Capabilities = null, string? AuthenticatedUserId = null, string? Role = null);
+    public record OperatorInfo(Guid SessionId, string Callsign, bool AudioConnected, bool SerialConnected, bool HasControl, bool HasTx, int QueuePosition, string Role = "Operator");
+    public record OperatorsStateMessage(OperatorInfo[] Operators);
+    public record HealthStateMessage(string ServerVersion, int ProtocolVersion, bool SerialConnected, bool AudioCaptureReady, bool AudioPlaybackReady, int ConnectedOperators, int TxLeaseSeconds, int MaxTxSeconds, string[] Capabilities);
     public record ControlGrantedMessage(Guid SessionId, string Callsign);
-
     public record ControlDeniedMessage(string Reason);
-
     // FrequencyMHz/Modulation: QDNH no interpreta el protocolo CAT (ver
     // Serial/UART.cs, un relay ciego), asi que no tiene forma de saber la
     // frecuencia/modo actuales por si mismo. Es el propio QDockX del
@@ -50,12 +47,8 @@ namespace QDNH.SharedRadio
     // aqui al pedir el TX; QDNH solo los reenvia tal cual en
     // TxMonitorStarted para que los demas clientes los muestren.
     public record RequestTxMessage(double FrequencyMHz, string Modulation);
-
     public record TxGrantedMessage(Guid SessionId, string Callsign);
-
     public record TxDeniedMessage(string Reason);
-
     public record TxReleasedMessage(string Reason);
-
     public record TxMonitorStartedMessage(Guid SessionId, string Callsign, double FrequencyMHz, string Modulation);
 }

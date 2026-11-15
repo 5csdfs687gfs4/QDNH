@@ -11,7 +11,7 @@ namespace QDNH.Network
     {
         public byte[] Salt { get; private set; }
         public byte[] Hash { get; private set; }
-        public Authenticator(string password) 
+        public Authenticator(string password)
         {
             Salt = RandomNumberGenerator.GetBytes(32);
             byte[] b = Encoding.ASCII.GetBytes(password).Concat(Salt).ToArray();
@@ -19,9 +19,9 @@ namespace QDNH.Network
             Hash = sha.ComputeHash(b);
         }
 
-        public bool Challenge(byte[] challenge) 
+        public bool Challenge(byte[] challenge)
         {
-            return challenge.SequenceEqual(Hash);
+            return CryptographicOperations.FixedTimeEquals(challenge, Hash);
         }
     }
 }

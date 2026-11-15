@@ -31,4 +31,11 @@ Hay que abrir en el router/cortafuegos el puerto **base+3** (TCP), igual que los
 - El nivel `SmeterRaw` es el valor relativo de OpenWebRX, no dBm.
 - No hay WFM ni modos digitales (solo audio a 12 kHz).
 - El audio del SDR llega con más retardo que el de la radio local.
-- Implementación reconstruida a partir del protocolo de QDockX y de `tools/rfcapture/openwebrx_capture.py`. Probada con un OpenWebRX simulado (`QDNH.Tests/MultiRxTests.cs`); **pendiente de validar contra el OpenWebRX real y con QDockX**.
+- Con MultiRX en ON y sin señal se oye el soplido de FM: no se envía silenciador (squelch) al SDR.
+- Implementación reconstruida a partir del protocolo de QDockX y de `tools/rfcapture/openwebrx_capture.py`.
+
+## Validación
+
+- Pruebas automáticas con un OpenWebRX simulado (`QDNH.Tests/MultiRxTests.cs`).
+- 15-nov-2026, contra el OpenWebRX real (hispalis-sdr, OpenWebRX+ v1.2.117, perfil 2 m): QDNH completo con un cliente de prueba que habla el protocolo de QDockX. Conexión, audio continuo a la tasa nominal en el puerto base+3, resintonía con control, rechazos `CONTROL_REQUIRED` y `OUT_OF_RANGE`, y liberación del SDR al irse el oyente. Decodificación ADPCM comprobada bloque a bloque contra las cabeceras del propio servidor.
+- **Pendiente**: prueba con QDockX en el teléfono y con una señal conocida al aire.

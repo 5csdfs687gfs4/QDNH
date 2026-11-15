@@ -94,6 +94,10 @@ namespace QDNH.Language
                                 @"P none\t\tClear login password\n" +
                                 @"L milliseconds\tSet audio latency\n" +
                                 @"M mode\t\tSet operation mode: all, serial or audio\n" +
+                                @"U on|off\tShared Radio Mode (multi-user)\n" +
+                                @"W on|off\tMultiRX: second receiver through a remote OpenWebRX\n" +
+                                @"WU url\t\tMultiRX: OpenWebRX address (e.g. http://host:8073), none to clear\n" +
+                                @"WF MHz [mode]\tMultiRX: frequency and mode (nfm, am, usb, lsb, cw)\n" +
                                 @"R\t\tRefesh devices\n" +
                                 @"Q\t\tQuit program\n\n" }};
         private static readonly Dictionary<string, string> table = entable.Copy();

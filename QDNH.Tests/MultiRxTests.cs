@@ -346,6 +346,9 @@ public class MultiRxTests
         public string Url { get; }
         public long CenterFreq = 145_000_000, SampleRate = 2_400_000;
         public byte[] Audio = Array.Empty<byte>();
+        public bool Continuous;
+        public long? ProfileChangeAfterStart;
+        public int Tunes;
 
         public FakeOpenWebRx()
         {
@@ -383,6 +386,22 @@ public class MultiRxTests
                     lock (Received) Received.Add(text);
                     if (text.StartsWith("SERVER DE CLIENT"))
                         await Send(ws, $"{{\"type\":\"config\",\"value\":{{\"center_freq\":{CenterFreq},\"samp_rate\":{SampleRate},\"audio_compression\":\"adpcm\"}}}}");
+                    if (text.Contains("offset_freq")) Interlocked.Increment(ref Tunes);
+                    if (ProfileChangeAfterStart is long newCenter && text.Contains("\"action\":\"start\""))
+                        await Send(ws, $"{{\"type\":\"config\",\"value\":{{\"center_freq\":{newCenter}}}}}");
+                    if (Continuous && text.Contains("\"action\":\"start\"") && !streaming)
+                    {
+                        streaming = true;
+                        _ = Task.Run(async () =>
+                        {
+                            while (ws.State == WebSocketState.Open && !stop.IsCancellationRequested)
+                            {
+                                for (int offset = 0; offset < Audio.Length; offset += 500)
+                                    await ws.SendAsync(new byte[] { 2 }.Concat(Audio.Skip(offset).Take(500)).ToArray(), WebSocketMessageType.Binary, true, stop.Token);
+                                await Task.Delay(20, stop.Token);
+                            }
+                        });
+                    }
                     if (text.Contains("\"action\":\"start\"") && !streaming)
                     {
                         streaming = true;
@@ -465,6 +484,31 @@ public class MultiRxTests
         Thread.Sleep(600);
         Assert.Equal(connections, sdr.Connections);
         Assert.Equal(1, connections);
+    }
+
+    [Fact]
+    public void ProfileChangeOutsideCoverageSilencesAudioUntilRetunedInsideNewProfile()
+    {
+        // El SDR cambia de perfil (430 MHz) justo despues de arrancar: lo que
+        // demodula ya no es la frecuencia pedida, asi que no debe repartirse.
+        using var sdr = new FakeOpenWebRx { Continuous = true, ProfileChangeAfterStart = 433_000_000 };
+        sdr.Audio = Encode(Tone(ImaAdpcmSyncDecoder.BlockBytes * 2, 12000, 1000)).Stream;
+        long bytes = 0;
+        using var receiver = new OpenWebRxReceiver(sdr.Url, 145_500_000, "nfm",
+            (_, length) => Interlocked.Add(ref bytes, length), _ => { }, null, 22050, TimeSpan.FromMilliseconds(200));
+        receiver.SetActive(true);
+        Assert.True(WaitFor(() => receiver.Status.LastError?.Contains("fuera del perfil") == true));
+        Assert.False(receiver.Status.DspStarted);
+        Thread.Sleep(200); // deja pasar lo que estuviera en vuelo
+        long silenced = Interlocked.Read(ref bytes);
+        Thread.Sleep(500);
+        Assert.Equal(silenced, Interlocked.Read(ref bytes));
+        Assert.Equal("OUT_OF_RANGE", receiver.Tune(145_500_000, "nfm", -5000, 5000));
+
+        Assert.Null(receiver.Tune(433_500_000, "nfm", -5000, 5000));
+        Assert.True(WaitFor(() => Interlocked.Read(ref bytes) > silenced), "el audio no volvio tras resintonizar");
+        Assert.True(WaitFor(() => receiver.Status is { DspStarted: true, LastError: null, FrequencyHz: 433_500_000 }));
+        Assert.Contains(sdr.Snapshot(), t => t.Contains("\"offset_freq\":500000"));
     }
 
     [Fact]

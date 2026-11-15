@@ -347,20 +347,32 @@ namespace QDNH
                             postAction = CommandPostAction.Error;
                             break;
                         }
-                        Vars.OpenWebRxFrequencyHz = (long)Math.Round(sdrMHz * 1_000_000.0);
-                        Vars.OpenWebRxModulation = sdrMod;
+                        long sdrHz = (long)Math.Round(sdrMHz * 1_000_000.0);
                         // Con el receptor ya en marcha basta con resintonizar:
-                        // no hace falta reiniciar los canales de la radio.
+                        // no hace falta reiniciar los canales de la radio. La
+                        // configuracion solo se cambia y se guarda si el
+                        // receptor acepta la sintonia.
                         if (sdrReceiver != null)
                         {
                             var (sdrLow, sdrHigh) = OpenWebRxProtocol.DefaultFilter(sdrMod);
-                            string? denied = sdrReceiver.Tune(Vars.OpenWebRxFrequencyHz, sdrMod, sdrLow, sdrHigh);
-                            if (denied != null) Err($"MultiRX: sintonia rechazada ({denied})");
+                            string? denied = sdrReceiver.Tune(sdrHz, sdrMod, sdrLow, sdrHigh);
+                            if (denied != null)
+                            {
+                                Err($"MultiRX: sintonia rechazada ({denied}); se mantiene la anterior");
+                                postAction = CommandPostAction.Error;
+                                break;
+                            }
+                            Vars.OpenWebRxFrequencyHz = sdrHz;
+                            Vars.OpenWebRxModulation = sdrMod;
                             Vars.Save();
                             DisplayMultiRx();
                         }
                         else
+                        {
+                            Vars.OpenWebRxFrequencyHz = sdrHz;
+                            Vars.OpenWebRxModulation = sdrMod;
                             postAction = CommandPostAction.Init;
+                        }
                         break;
                     case "U":
                         if (p.Length == 1) { DisplaySharedRadioMode(); break; }

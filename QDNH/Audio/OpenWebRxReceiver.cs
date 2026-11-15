@@ -134,6 +134,11 @@ namespace QDNH.Audio
         private ClientWebSocket? socket;
         private CancellationTokenSource? connectionCts;
         private long lastSmeterNotifyTick;
+        // La sintonia enviada al SDR corresponde a la frecuencia pedida. Pasa
+        // a false si el SDR cambia de perfil y la frecuencia queda fuera: el
+        // DSP remoto seguiria demodulando otra cosa, asi que se corta el audio.
+        private volatile bool tuningValid;
+        private volatile bool audioThisConnection;
 
         public OpenWebRxReceiver(string url, long frequencyHz, string modulation, Action<byte[], int> pcmSink,
             Action<SdrStatusMessage> statusSink, Action<string>? log = null, int targetRate = 22050, TimeSpan? linger = null)
@@ -152,7 +157,7 @@ namespace QDNH.Audio
 
         public SdrStatusMessage Status
         {
-            get { lock (gate) return new(connected, dspStarted, frequencyHz, modulation, smeter, lastError); }
+            get { lock (gate) return new(connected, dspStarted && tuningValid, frequencyHz, modulation, smeter, lastError); }
         }
 
         /// <summary>Hay (o deja de haber) oyentes del audio SDR.</summary>
@@ -220,7 +225,8 @@ namespace QDNH.Audio
                     try { await wake.WaitAsync(stop); } catch (OperationCanceledException) { break; }
                     continue;
                 }
-                bool gotAudio = false;
+                audioThisConnection = false;
+                tuningValid = false;
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(stop);
                 using var ws = new ClientWebSocket();
                 ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
@@ -237,7 +243,7 @@ namespace QDNH.Audio
                     lock (gate) { connected = true; lastError = null; }
                     log($"[MultiRX] conectado a {uri}");
                     Notify();
-                    gotAudio = await ReceiveAsync(ws, cts.Token);
+                    await ReceiveAsync(ws, cts.Token);
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
                 catch (OperationCanceledException)
@@ -259,6 +265,10 @@ namespace QDNH.Audio
                     Notify();
                 }
                 if (stop.IsCancellationRequested) break;
+                // Se mira si esta conexion llego a dar audio aunque acabara con
+                // una excepcion: un corte tras funcionar bien no debe alargar
+                // la espera como si el SDR nos estuviera rechazando.
+                bool gotAudio = audioThisConnection;
                 failures = gotAudio ? 0 : Math.Min(failures + 1, 4);
                 lock (gate) isActive = active;
                 if (isActive)
@@ -271,11 +281,11 @@ namespace QDNH.Audio
             }
         }
 
-        private async Task<bool> ReceiveAsync(ClientWebSocket ws, CancellationToken token)
+        private async Task ReceiveAsync(ClientWebSocket ws, CancellationToken token)
         {
             var decoder = new ImaAdpcmSyncDecoder();
             var resampler = new PcmResampler(OpenWebRxProtocol.AudioRate, targetRate);
-            bool compressed = true, gotAudio = false;
+            bool compressed = true;
             byte[] buffer = new byte[32768];
             short[] decoded = new short[4096], resampled = new short[8192];
             byte[] pcm = new byte[16384];
@@ -287,7 +297,7 @@ namespace QDNH.Audio
                 do
                 {
                     result = await ws.ReceiveAsync(buffer.AsMemory(), token);
-                    if (result.MessageType == WebSocketMessageType.Close) return gotAudio;
+                    if (result.MessageType == WebSocketMessageType.Close) return;
                     message.Write(buffer, 0, result.Count);
                     if (message.Length > 4 * 1024 * 1024) throw new InvalidDataException("mensaje del SDR demasiado grande");
                 } while (!result.EndOfMessage);
@@ -299,6 +309,7 @@ namespace QDNH.Audio
                     continue;
                 }
                 if (data.Length < 2 || data[0] != OpenWebRxProtocol.FrameAudio) continue; // FFT y demas: no interesan
+                if (!tuningValid) { decoder.Reset(); resampler.Reset(); continue; } // audio de otra frecuencia: no se reparte
                 ReadOnlySpan<byte> audio = data[1..];
                 int samples;
                 if (compressed)
@@ -319,10 +330,9 @@ namespace QDNH.Audio
                 if (produced == 0) continue;
                 if (pcm.Length < produced * 2) pcm = new byte[produced * 2];
                 for (int i = 0; i < produced; i++) BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan(i * 2, 2), resampled[i]);
-                gotAudio = true;
+                audioThisConnection = true;
                 try { pcmSink(pcm, produced * 2); } catch { }
             }
-            return gotAudio;
         }
 
         /// <summary>Devuelve el nuevo estado de compresion si el mensaje lo cambia.</summary>
@@ -363,6 +373,7 @@ namespace QDNH.Audio
                 {
                     lastError = "frecuencia fuera del perfil activo del SDR";
                     control = "";
+                    tuningValid = false;
                 }
                 else
                 {
@@ -376,6 +387,7 @@ namespace QDNH.Audio
                 if (control.Length > 0)
                 {
                     await SendTextAsync(ws, control, token);
+                    lock (gate) if (ReferenceEquals(socket, ws)) tuningValid = true;
                     if (start)
                     {
                         await SendTextAsync(ws, OpenWebRxProtocol.DspStart(), token);

@@ -55,6 +55,14 @@ namespace QDNH.Settings
         public static int TxLeaseSeconds { get => txLeaseSeconds; set => txLeaseSeconds = value.Clamp(2, 120); }
         public static int MaxTxSeconds { get => maxTxSeconds; set => maxTxSeconds = value.Clamp(5, 1800); }
         public static bool SharedRadioMode { get; set; } = false;
+        // MultiRX: segundo receptor opcional a traves de un OpenWebRX
+        // remoto (Audio/OpenWebRxReceiver.cs), servido en NetworkPort+3.
+        // Apagado por defecto: con OpenWebRxEnabled en false ese puerto ni
+        // se abre y nada de esto interviene.
+        public static bool OpenWebRxEnabled { get; set; } = false;
+        public static string OpenWebRxUrl { get; set; } = string.Empty;
+        public static long OpenWebRxFrequencyHz { get; set; } = 145_500_000;
+        public static string OpenWebRxModulation { get; set; } = "nfm";
         public static int LatencyMils
         {
             get => latency;
@@ -95,7 +103,11 @@ namespace QDNH.Settings
                         nameof(SharedRadioMode),
                         SharedRadioMode.ToString(),
                         nameof(TxLeaseSeconds), TxLeaseSeconds.ToString(),
-                        nameof(MaxTxSeconds), MaxTxSeconds.ToString()
+                        nameof(MaxTxSeconds), MaxTxSeconds.ToString(),
+                        nameof(OpenWebRxEnabled), OpenWebRxEnabled.ToString(),
+                        nameof(OpenWebRxUrl), OpenWebRxUrl,
+                        nameof(OpenWebRxFrequencyHz), OpenWebRxFrequencyHz.ToString(),
+                        nameof(OpenWebRxModulation), OpenWebRxModulation
                     });
                 }
                 catch
@@ -146,6 +158,10 @@ namespace QDNH.Settings
                             break;
                         case nameof(TxLeaseSeconds): TxLeaseSeconds = int.TryParse(value, out p) ? p : 10; break;
                         case nameof(MaxTxSeconds): MaxTxSeconds = int.TryParse(value, out p) ? p : 180; break;
+                        case nameof(OpenWebRxEnabled): OpenWebRxEnabled = bool.TryParse(value, out bool owrx) && owrx; break;
+                        case nameof(OpenWebRxUrl): OpenWebRxUrl = value.Trim(); break;
+                        case nameof(OpenWebRxFrequencyHz): OpenWebRxFrequencyHz = long.TryParse(value, out long hz) && hz > 0 ? hz : 145_500_000; break;
+                        case nameof(OpenWebRxModulation): OpenWebRxModulation = value.Trim().ToLowerInvariant(); break;
                         case nameof(SharedRadioMode):
                             SharedRadioMode = bool.TryParse(value, out bool srm) && srm;
                             break;

@@ -168,6 +168,10 @@ namespace QDNH.Network
                                 case ControlMsgType.TxRelease:
                                     sessions.ReleaseTx(session.Id, "PTT_OFF");
                                     break;
+                                case ControlMsgType.SdrTune:
+                                    var tune = JsonSerializer.Deserialize<SdrTuneMessage>(payload);
+                                    if (tune != null) sessions.TryRequestSdrTune(session.Id, tune);
+                                    break;
                             }
                         });
                         if (!current) break;

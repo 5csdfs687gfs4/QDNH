@@ -50,7 +50,22 @@ namespace QDNH.SharedRadio
         private readonly List<Guid> controlQueue = new();
         private readonly Dictionary<Guid, List<byte>> serialPending = new();
         public bool AuthenticationRequired { get; private set; }
-        private string[] AdvertisedCapabilities => AuthenticationRequired ? Capabilities.Concat(new[] { "operator-auth-v1" }).ToArray() : Capabilities;
+        private string[] AdvertisedCapabilities
+        {
+            get
+            {
+                IEnumerable<string> list = Capabilities;
+                if (AuthenticationRequired) list = list.Append("operator-auth-v1");
+                if (SdrTuneHandler != null) list = list.Append("multirx-v1");
+                return list.ToArray();
+            }
+        }
+        // MultiRX (receptor SDR remoto, ver Audio/OpenWebRxReceiver.cs). Los
+        // rellena Main.cs solo cuando MultiRX esta activado; con null, el
+        // servidor se comporta exactamente igual que antes de existir.
+        // SdrTuneHandler devuelve null si acepta la sintonia o el motivo.
+        public Func<SdrTuneMessage, string?>? SdrTuneHandler { get; set; }
+        public Func<SdrStatusMessage?>? SdrStatusProvider { get; set; }
         private readonly Timer txWatchdog;
 
         // Throttle del aviso "audio TX descartado": un cliente SIN Fase B
@@ -126,6 +141,8 @@ namespace QDNH.SharedRadio
                 SendTo(session, ControlMsgType.HelloAck,
                     new HelloAckMessage(ControlOwnerSessionId != null, controlCallsign, TxOwnerSessionId != null, txCallsign, 2, Vars.Version, AdvertisedCapabilities, principal?.UserId, principal?.Role.ToString()));
                 BroadcastOperators();
+                if (session.SupportsExtensions && SdrStatusProvider?.Invoke() is { } sdrStatus)
+                    SendTo(session, ControlMsgType.SdrStatus, sdrStatus);
                 if (supportsTxMonitor && monitorAnnounced && TxOwnerSessionId != sessionId &&
                     TxOwnerSessionId is Guid ownerId && sessions.TryGetValue(ownerId, out var txOwner))
                     SendTo(session, ControlMsgType.TxMonitorStarted,
@@ -266,6 +283,42 @@ namespace QDNH.SharedRadio
         }
 
         public bool IsControlOwner(Guid sessionId) => ControlOwnerSessionId == sessionId;
+
+        // ------------------------------------------------------------
+        // MultiRX: sintonia del SDR remoto
+        // ------------------------------------------------------------
+
+        /// <summary>Resintonizar el SDR compartido es mover un recurso que
+        /// oyen todos, asi que se exige lo mismo que para cualquier comando
+        /// CAT: tener el Control Lock.</summary>
+        public void TryRequestSdrTune(Guid sessionId, SdrTuneMessage request)
+        {
+            lock (sync)
+            {
+                if (!sessions.TryGetValue(sessionId, out var session)) return;
+                string? reason =
+                    SdrTuneHandler == null ? "SDR_DISABLED" :
+                    ControlOwnerSessionId != sessionId ? "CONTROL_REQUIRED" :
+                    request.Modulation == null ? "INVALID_MODULATION" : null;
+                if (reason == null)
+                {
+                    try { reason = SdrTuneHandler!(request); } catch { reason = "SDR_ERROR"; }
+                }
+                if (reason != null)
+                {
+                    SendTo(session, ControlMsgType.SdrTuneDenied, new SdrTuneDeniedMessage(reason));
+                    return;
+                }
+                Vars.Out($"[MultiRX] {session.Callsign} sintoniza el SDR en {request.FrequencyHz / 1_000_000.0:F4} MHz ({request.Modulation})");
+            }
+        }
+
+        /// <summary>Reparte el estado del SDR a todos los clientes que
+        /// entienden extensiones. Lo llama el receptor desde su propio hilo.</summary>
+        public void BroadcastSdrStatus(SdrStatusMessage status)
+        {
+            lock (sync) Broadcast(ControlMsgType.SdrStatus, status, s => s.SupportsExtensions);
+        }
         public bool ExecuteControl(Guid id, Action<byte[]> source, Action action)
         {
             lock (sync)

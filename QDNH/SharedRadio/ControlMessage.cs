@@ -33,6 +33,12 @@ namespace QDNH.SharedRadio
         TxReleased = 10,
         TxMonitorStarted = 11,
         TxMonitorStopped = 12,
+        // MultiRX: sintonia (cliente -> servidor) y estado (servidor ->
+        // clientes) del receptor SDR remoto. Mismos numeros y payloads que
+        // QDockX (Network/ControlMessage.cs).
+        SdrTune = 15,
+        SdrTuneDenied = 16,
+        SdrStatus = 17,
         HealthRequest = 21, HealthState = 22, OperatorsRequest = 23, OperatorsState = 24, QueueJoin = 25, QueueLeave = 26,
     }
     public record HelloMessage(Guid SessionId, string Callsign, bool SupportsTxMonitor, int ProtocolVersion = 1, string[]? Capabilities = null);
@@ -56,5 +62,10 @@ namespace QDNH.SharedRadio
     public record TxGrantedMessage(Guid SessionId, string Callsign, long RequestId = 0);
     public record TxDeniedMessage(string Reason, long RequestId = 0);
     public record TxReleasedMessage(string Reason, long RequestId = 0, Guid? SessionId = null);
+    // MultiRX. LowCut/HighCut en Hz relativos a la portadora. SmeterRaw es
+    // el nivel relativo que da OpenWebRX tal cual: no es dBm ni esta calibrado.
+    public record SdrTuneMessage(long FrequencyHz, string Modulation, int LowCut = -5000, int HighCut = 5000);
+    public record SdrTuneDeniedMessage(string Reason);
+    public record SdrStatusMessage(bool Connected, bool DspStarted, long FrequencyHz, string Modulation, double? SmeterRaw, string? LastError);
     public record TxMonitorStartedMessage(Guid SessionId, string Callsign, double FrequencyMHz, string Modulation);
 }

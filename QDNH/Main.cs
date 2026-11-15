@@ -40,6 +40,11 @@ namespace QDNH
         // tradicional de un solo usuario (arriba) no se toca.
         private static MultiListen? multiAudioServer = null, multiSerialServer = null;
         private static ControlChannel? controlChannel = null;
+        // MultiRX: receptor SDR remoto (OpenWebRX) y su puerto de audio
+        // (NetworkPort+3). Solo existen con Vars.OpenWebRxEnabled; no
+        // intervienen en la radio local ni en la salud del servidor.
+        private static SdrListen? sdrServer = null;
+        private static OpenWebRxReceiver? sdrReceiver = null;
         private static readonly QDNH.SharedRadio.SessionManager sessions = new(ReleasePhysicalPtt);
         private static void ReleasePhysicalPtt()
         {
@@ -288,6 +293,87 @@ namespace QDNH
                                 break;
                         }
                         break;
+                    case "W":
+                        if (p.Length == 1) { DisplayMultiRx(); break; }
+                        switch (p1s.ToLower())
+                        {
+                            case "on":
+                                if (OpenWebRxProtocol.NormalizeUrl(Vars.OpenWebRxUrl) == null)
+                                {
+                                    Err("MultiRX: falta la URL del OpenWebRX (WU url)");
+                                    postAction = CommandPostAction.Error;
+                                    break;
+                                }
+                                Vars.OpenWebRxEnabled = true;
+                                postAction = CommandPostAction.Init;
+                                break;
+                            case "off":
+                                Vars.OpenWebRxEnabled = false;
+                                postAction = CommandPostAction.Init;
+                                break;
+                            default:
+                                Err($"{Lang.UnknownCommand} '{command}'");
+                                postAction = CommandPostAction.Error;
+                                break;
+                        }
+                        break;
+                    case "WU":
+                        if (p.Length == 1) { DisplayMultiRx(); break; }
+                        if (p1s.ToLower().Equals("none"))
+                        {
+                            Vars.OpenWebRxUrl = string.Empty;
+                            Vars.OpenWebRxEnabled = false;
+                            postAction = CommandPostAction.Init;
+                            break;
+                        }
+                        string? sdrUrl = OpenWebRxProtocol.NormalizeUrl(p1s);
+                        if (sdrUrl == null)
+                        {
+                            Err($"MultiRX: URL no valida '{p1s}'");
+                            postAction = CommandPostAction.Error;
+                            break;
+                        }
+                        Vars.OpenWebRxUrl = sdrUrl;
+                        postAction = CommandPostAction.Init;
+                        break;
+                    case "WF":
+                        if (p.Length == 1) { DisplayMultiRx(); break; }
+                        string sdrMod = p.Length > 2 ? p[2].ToLower() : Vars.OpenWebRxModulation;
+                        if (sdrMod == "fm") sdrMod = "nfm";
+                        if (!double.TryParse(p1s.Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double sdrMHz)
+                            || sdrMHz <= 0 || sdrMHz > 30000 || Array.IndexOf(OpenWebRxProtocol.Modulations, sdrMod) < 0)
+                        {
+                            Err($"MultiRX: frecuencia (MHz) o modo no validos '{command}' (modos: {string.Join(", ", OpenWebRxProtocol.Modulations)})");
+                            postAction = CommandPostAction.Error;
+                            break;
+                        }
+                        long sdrHz = (long)Math.Round(sdrMHz * 1_000_000.0);
+                        // Con el receptor ya en marcha basta con resintonizar:
+                        // no hace falta reiniciar los canales de la radio. La
+                        // configuracion solo se cambia y se guarda si el
+                        // receptor acepta la sintonia.
+                        if (sdrReceiver != null)
+                        {
+                            var (sdrLow, sdrHigh) = OpenWebRxProtocol.DefaultFilter(sdrMod);
+                            string? denied = sdrReceiver.Tune(sdrHz, sdrMod, sdrLow, sdrHigh);
+                            if (denied != null)
+                            {
+                                Err($"MultiRX: sintonia rechazada ({denied}); se mantiene la anterior");
+                                postAction = CommandPostAction.Error;
+                                break;
+                            }
+                            Vars.OpenWebRxFrequencyHz = sdrHz;
+                            Vars.OpenWebRxModulation = sdrMod;
+                            Vars.Save();
+                            DisplayMultiRx();
+                        }
+                        else
+                        {
+                            Vars.OpenWebRxFrequencyHz = sdrHz;
+                            Vars.OpenWebRxModulation = sdrMod;
+                            postAction = CommandPostAction.Init;
+                        }
+                        break;
                     case "U":
                         if (p.Length == 1) { DisplaySharedRadioMode(); break; }
                         switch (p1s.ToLower())
@@ -445,6 +531,7 @@ namespace QDNH
             string ports3 = Vars.SharedRadioMode
                 ? $"{Vars.NetworkPort}, {Vars.NetworkPort + 1}, {Vars.NetworkPort + 2}"
                 : $"{Vars.NetworkPort}, {Vars.NetworkPort + 1}";
+            if (Vars.OpenWebRxEnabled) ports3 += $", {Vars.NetworkPort + 3} (MultiRX)";
             Out($"\n{Lang.NetPorts}\t\t{ports3}");
             Out($"\n{Lang.LocalHost}\t\t{Dns.GetHostName()}");
         }
@@ -454,6 +541,23 @@ namespace QDNH
             Out($"\nShared Radio Mode\t{(Vars.SharedRadioMode ? "ON" : "OFF")}");
             if (Vars.SharedRadioMode)
                 Out($"  Control port\t\t{Vars.NetworkPort + 2}");
+        }
+
+        private static void DisplayMultiRx()
+        {
+            Out($"\nMultiRX (OpenWebRX)\t{(Vars.OpenWebRxEnabled ? "ON" : "OFF")}");
+            Out($"  URL\t\t\t{(Vars.OpenWebRxUrl.Length == 0 ? "-" : Vars.OpenWebRxUrl)}");
+            Out($"  Frecuencia\t\t{Vars.OpenWebRxFrequencyHz / 1_000_000.0:F4} MHz ({Vars.OpenWebRxModulation})");
+            if (Vars.OpenWebRxEnabled)
+            {
+                Out($"  Audio port\t\t{Vars.NetworkPort + 3}");
+                if (sdrReceiver != null)
+                {
+                    var st = sdrReceiver.Status;
+                    string state = !st.Connected ? (sdrServer?.Listeners > 0 ? "conectando" : "en espera (sin oyentes)") : st.DspStarted ? "recibiendo" : "conectado";
+                    Out($"  Estado\t\t{state}, oyentes={sdrServer?.Listeners ?? 0}{(st.LastError != null ? $", aviso: {st.LastError}" : "")}");
+                }
+            }
         }
 
         private static void DisplayPassword(bool unmask)
@@ -485,6 +589,7 @@ namespace QDNH
             DisplayPassword(false);
             DisplayLatency();
             DisplaySharedRadioMode();
+            DisplayMultiRx();
         }
 
         private static void Init()
@@ -497,6 +602,7 @@ namespace QDNH
             initializationComplete = false;
             System.Threading.Interlocked.Exchange(ref lastCaptureTick, 0);
             sessions.ReleaseAnyTx("SERVER_RECONFIGURED");
+            CloseMultiRx();
             controlChannel?.Close(); controlChannel = null;
             multiAudioServer?.Close(); multiAudioServer = null;
             multiSerialServer?.Close(); multiSerialServer = null;
@@ -587,8 +693,40 @@ namespace QDNH
                 sessions.ReadScreenCommand = frame => serialPort?.Send(frame, 0, frame.Length);
                 try { controlChannel = new(Vars.NetworkPort + 2, sessions, operatorAuthentication); } catch { }
             }
+            StartMultiRx(operatorAuthentication);
             System.Threading.Interlocked.Exchange(ref initializedAtTick, Stopwatch.GetTimestamp());
             initializationComplete = true;
+        }
+
+        private static void CloseMultiRx()
+        {
+            sessions.SdrTuneHandler = null;
+            sessions.SdrStatusProvider = null;
+            sdrServer?.Close(); sdrServer = null;
+            sdrReceiver?.Dispose(); sdrReceiver = null;
+        }
+
+        // MultiRX es un extra: cualquier fallo al arrancarlo se avisa y se
+        // deja apagado, sin impedir que el resto del servidor quede listo.
+        private static void StartMultiRx(OperatorAuthentication? operatorAuthentication)
+        {
+            if (!Vars.OpenWebRxEnabled) return;
+            try
+            {
+                var receiver = new OpenWebRxReceiver(Vars.OpenWebRxUrl, Vars.OpenWebRxFrequencyHz, Vars.OpenWebRxModulation,
+                    (pcm, length) => sdrServer?.Broadcast(pcm, length),
+                    status => sessions.BroadcastSdrStatus(status),
+                    text => Out(text), Vars.WaveFormat.SampleRate);
+                sdrReceiver = receiver;
+                sdrServer = new SdrListen(Vars.NetworkPort + 3, listeners => receiver.SetActive(listeners > 0), operatorAuthentication);
+                sessions.SdrStatusProvider = () => receiver.Status;
+                sessions.SdrTuneHandler = request => receiver.Tune(request.FrequencyHz, request.Modulation, request.LowCut, request.HighCut);
+            }
+            catch (Exception ex)
+            {
+                Err($"MultiRX no disponible: {ex.Message}");
+                CloseMultiRx();
+            }
         }
 
 
